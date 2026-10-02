@@ -1,0 +1,60 @@
+# Dependencies
+node_modules/
+jspm_packages/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pnp*
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yaml
+.yarn/install-state.gz
+
+# Testing & Coverage
+coverage/
+.nyc_output/
+
+# Production Builds
+dist/
+build/
+out/
+
+# Logs & Diagnostics
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Environment Variables & Secrets
+.env
+.env.*
+!.env.example
+
+# Local runtime configuration and credentials
+/auth/
+/bot-config.json
+/credentials.json
+/config/
+/config.json
+*.config.json
+*-config.json
+!/messages.json
+
+# Editor & IDE Files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# OS Metadata
+.DS_Store
+Thumbs.db
