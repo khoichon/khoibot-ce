@@ -1,11 +1,34 @@
 // use ollama
+const { Ollama } = require('ollama');
 const ollama = require('ollama').default;
 
 const modelconfig = {
-    summarize: "qwen3:8b"
+    summarize: "qwen3:8b",
+    // off by default. USE_DESKTOP_AI=1 tries the desktop first, falls back to local if its off
+    useDesktop: process.env.USE_DESKTOP_AI === "1",
+    desktopHost: process.env.DESKTOP_AI_HOST,
+    // which model to use on each side, both default to qwen3:8b
+    desktopModel: process.env.DESKTOP_AI_MODEL || "qwen3:8b",
+    localModel: process.env.LOCAL_AI_MODEL || "qwen3:8b",
+    // the desktop model doesnt think by default, it was returning empty summaries. DESKTOP_AI_THINK=1 turns it back on
+    desktopThink: process.env.DESKTOP_AI_THINK === "1"
 }
 
-function summarizeText(text) {
+// ping the desktop, if it answers use it, otherwise use the local ollama
+async function pickClient() {
+    const local = { client: ollama, model: modelconfig.localModel };
+    if (!modelconfig.useDesktop || !modelconfig.desktopHost) return local;
+    const desktop = new Ollama({ host: modelconfig.desktopHost });
+    const timeout = new Promise((_, no) => setTimeout(() => no(new Error("timeout")), 1500));
+    try {
+        await Promise.race([desktop.list(), timeout]);
+        return { client: desktop, model: modelconfig.desktopModel, think: modelconfig.desktopThink };
+    } catch {
+        return local;
+    }
+}
+
+async function summarizeText(text) {
     // summarize yayy! (here comes a few constants for like layout and stuff)
     const system_prompt = `# Long-Text Summarization
 
@@ -231,8 +254,10 @@ Do not add information that is not supported by the text.
 ${text}
 `
 
-    return ollama.chat({
-        model: modelconfig.summarize,
+    const { client, model, think } = await pickClient();
+    return client.chat({
+        model: model,
+        think: think,
         messages: [
             { role: "system", content: system_prompt },
             { role: "user", content: user_prompt }

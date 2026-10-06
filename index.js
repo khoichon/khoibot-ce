@@ -26,14 +26,10 @@ const {
 
     getGroupSettings,
     getGroupSetting,
-    setGroupSetting,
-
-    commandExecuted
+    setGroupSetting
 } = require("./config.js");
 
-const { 
-    randomWord
-} = require("./wordhelper.js");
+const games = require("./games.js");
 
 const { isToxic } = require("./moderation.js");
 
@@ -54,140 +50,10 @@ const {
 
 const devMode = process.argv.includes("--dev");
 const commandPrefix = devMode ? "t!" : "!";
-const fs = require('node:fs');
-const responses = JSON.parse(fs.readFileSync('messages.json', 'utf8'));
+const path = require("node:path");
 // ============================================================
-// Extra functions
+// Welcome message
 // ============================================================
-
-const decryptGames = new Map();
-
-function formatDecryptWord(word, revealedIndices) {
-    return Array.from(word, (character, index) =>
-        revealedIndices.has(index) ? character : "#"
-    ).join("");
-}
-
-function scheduleDecryptHint(sock, game) {
-    game.timeout = setTimeout(async () => {
-        if (decryptGames.get(game.groupId) !== game) {
-            return;
-        }
-
-        const hiddenIndices = Array.from(
-            { length: game.word.length },
-            (_, index) => index
-        ).filter(index => !game.revealedIndices.has(index));
-
-        const indexToReveal = hiddenIndices[
-            Math.floor(Math.random() * hiddenIndices.length)
-        ];
-        game.revealedIndices.add(indexToReveal);
-
-        const maskedWord = formatDecryptWord(game.word, game.revealedIndices);
-        const hasLost = game.revealedIndices.size === game.word.length;
-
-        if (hasLost) {
-            decryptGames.delete(game.groupId);
-        }
-
-        try {
-            await sock.sendMessage(game.groupId, {
-                text: hasLost
-                    ? `Hint: ${maskedWord}\nNobody solved it in time. The word was "${game.word}". git good hehe`
-                    : `Hint: ${maskedWord}`
-            });
-        } catch (error) {
-            console.error("Error sending decrypt game hint:", error);
-        }
-
-        if (
-            hasLost &&
-            game.tournamentRound &&
-            tournaments.get(game.groupId) === game.tournamentRound &&
-            game.tournamentRound.status === "running"
-        ) {
-            await startTournamentRound(sock, game.groupId);
-            return;
-        }
-
-        if (!hasLost && decryptGames.get(game.groupId) === game) {
-            scheduleDecryptHint(sock, game);
-        }
-    }, 30_000);
-}
-
-async function startDecryptGame(sock, groupId, tournamentRound = null) {
-    const game = {
-        groupId,
-        loading: true,
-        word: null,
-        revealedIndices: new Set(),
-        timeout: null,
-        tournamentRound
-    };
-    decryptGames.set(groupId, game);
-
-    try {
-        const word = await randomWord("1", 7);
-        console.log(`Starting decrypt game in group ${groupId} with word: ${word}`);
-
-        if (decryptGames.get(groupId) !== game) {
-            return false;
-        }
-
-        if (!word) {
-            decryptGames.delete(groupId);
-            await sock.sendMessage(groupId, {
-                text: "they didnt give me a word. theyre so weird."
-            });
-            return false;
-        }
-
-        if (typeof word !== "string" || !/^[a-z]{3,}$/i.test(word)) {
-            decryptGames.delete(groupId);
-            await sock.sendMessage(groupId, {
-                text: "they gave me a \"not a word\"?? i thought everything was a word. weird."
-            });
-            return false;
-        }
-        if (typeof word !== "string" || !/^[a-z]{3,}$/i.test(word)) {
-            decryptGames.delete(groupId);
-            await sock.sendMessage(groupId, {
-                text: "i forgot the word. whoops."
-            });
-            return false;
-        }
-
-        game.word = word.toLowerCase();
-        game.loading = false;
-
-        while (game.revealedIndices.size < Math.min(2, game.word.length - 3)) {
-            game.revealedIndices.add(
-                Math.floor(Math.random() * game.word.length)
-            );
-        }
-
-        await sock.sendMessage(groupId, {
-            text: `find the word hehe\n${formatDecryptWord(game.word, game.revealedIndices)}\na new letter arrives in 30 seconds.`
-        });
-
-        if (decryptGames.get(groupId) === game) {
-            scheduleDecryptHint(sock, game);
-        }
-        return true;
-    } catch (error) {
-        if (decryptGames.get(groupId) !== game) {
-            return false;
-        }
-        decryptGames.delete(groupId);
-        console.error("Error starting decrypt game:", error);
-        await sock.sendMessage(groupId, {
-            text: "SOMETHING WENT WRONG BOOP BOOP BOOP ERROR ERROR ERROR HEHEHEHEHEHEHEHEH"
-        });
-        return false;
-    }
-}
 
 async function sendWelcomeMessage(sock, groupId, participants, welcomeMsg) {
     for (const participant of participants) {
@@ -293,156 +159,6 @@ async function isGroupAdmin(sock, msg) {
     }
 }
 
-// ============================================================
-// Game tournaments
-// What this does is that a player can start a tournament in a group, and other players can join the tournament. 
-// The bot will then start a minigame but only listen to the players that joined the tournament. 
-// Every person that wins one minigame round gets one point. 
-// The first player to reach 3 points (configurable) wins the tournament. 
-// The bot will then announce the winner and end the tournament.
-// These are only the helper functions for the tournament. The actual tournament logic is in the socket section.
-// ============================================================
-
-const tournaments = new Map();
-
-const minigames = ["decrypt"];
-
-function createTournament(groupId, creatorId, maxPoints = 3, minigame = "decrypt") {
-    if (
-        !groupId ||
-        !creatorId ||
-        !Number.isSafeInteger(maxPoints) ||
-        maxPoints < 1
-    ) {
-        return false;
-    }
-
-    if (!minigames.includes(minigame)) {
-        return false;
-    }
-
-    if (tournaments.has(groupId)) {
-        return false;
-    }
-
-    const players = new Set([creatorId]);
-    tournaments.set(groupId, {
-        creatorId,
-        players,
-        scores: new Map([[creatorId, 0]]),
-        maxPoints,
-        minigame,
-        status: "lobby"
-    });
-
-    return true;
-}
-
-function joinTournament(groupId, playerId) {
-    const tournament = tournaments.get(groupId);
-    if (!tournament || tournament.status !== "lobby" || !playerId) {
-        return false;
-    }
-
-    if (tournament.players.has(playerId)) {
-        return false;
-    }
-
-    tournament.players.add(playerId);
-    tournament.scores.set(playerId, 0);
-
-    return true;
-}
-
-function leaveTournament(groupId, playerId) {
-    const tournament = tournaments.get(groupId);
-    if (
-        !tournament ||
-        tournament.status !== "lobby" ||
-        playerId === tournament.creatorId ||
-        !tournament.players.has(playerId)
-    ) {
-        return false;
-    }
-
-    tournament.players.delete(playerId);
-    tournament.scores.delete(playerId);
-
-    return true;
-}
-
-function getTournament(groupId) {
-    return tournaments.get(groupId);
-}
-
-function endTournament(groupId) {
-    const tournament = tournaments.get(groupId);
-    if (!tournament) {
-        return false;
-    }
-
-    const game = decryptGames.get(groupId);
-    if (game?.tournamentRound === tournament) {
-        clearTimeout(game.timeout);
-        decryptGames.delete(groupId);
-    }
-
-    return tournaments.delete(groupId);
-}
-
-async function startTournamentRound(sock, groupId) {
-    const tournament = tournaments.get(groupId);
-    if (
-        !tournament ||
-        tournament.status !== "running" ||
-        decryptGames.has(groupId)
-    ) {
-        return false;
-    }
-
-    if (tournament.minigame === "decrypt") {
-        const started = await startDecryptGame(sock, groupId, tournament);
-        if (!started && tournaments.get(groupId) === tournament) {
-            tournament.status = "lobby";
-        }
-        return started;
-    }
-
-    return false;
-}
-
-async function awardTournamentPoint(sock, groupId, playerId, expectedTournament) {
-    const tournament = tournaments.get(groupId);
-    if (
-        !tournament ||
-        tournament !== expectedTournament ||
-        tournament.status !== "running" ||
-        !tournament.players.has(playerId)
-    ) {
-        return;
-    }
-
-    const score = (tournament.scores.get(playerId) || 0) + 1;
-    tournament.scores.set(playerId, score);
-
-    if (score >= tournament.maxPoints) {
-        endTournament(groupId);
-        await sock.sendMessage(groupId, {
-            text: `@${playerId.split("@")[0]} wins the tournament with ${score} points!`,
-            mentions: [playerId]
-        });
-        return;
-    }
-
-    await sock.sendMessage(groupId, {
-        text: `@${playerId.split("@")[0]} wins the round and now has ${score}/${tournament.maxPoints} points. The next round is starting.`,
-        mentions: [playerId]
-    });
-
-    if (tournaments.get(groupId) === tournament) {
-        await startTournamentRound(sock, groupId);
-    }
-}
 
 
 
@@ -455,7 +171,9 @@ const startSock = async () => {
     const {
         state,
         saveCreds
-    } = await useMultiFileAuthState("auth");
+    } = await useMultiFileAuthState(
+        path.join(__dirname, "auth")
+    );
 
 
     const sock = makeWASocket({
@@ -986,39 +704,7 @@ const startSock = async () => {
                         continue;
                     }
 
-                    const decryptGame = decryptGames.get(chatId);
-                    if (
-                        decryptGame &&
-                        !decryptGame.loading &&
-                        text.trim().toLowerCase() === decryptGame.word
-                    ) {
-                        if (decryptGame.tournamentRound) {
-                            const tournament = getTournament(chatId);
-                            if (tournament !== decryptGame.tournamentRound) {
-                                clearTimeout(decryptGame.timeout);
-                                decryptGames.delete(chatId);
-                                continue;
-                            }
-                            if (!tournament.players.has(senderJid)) {
-                                continue;
-                            }
-                        }
-
-                        clearTimeout(decryptGame.timeout);
-                        decryptGames.delete(chatId);
-                        if (decryptGame.tournamentRound) {
-                            await awardTournamentPoint(
-                                sock,
-                                chatId,
-                                senderJid,
-                                decryptGame.tournamentRound
-                            );
-                        } else {
-                            await sock.sendMessage(chatId, {
-                                text: `@${senderJid.split("@")[0]} solved it first. The word was "${decryptGame.word}". impressive.`,
-                                mentions: [senderJid]
-                            });
-                        }
+                    if (await games.handleAnswer(sock, msg, { chatId, senderJid, text })) {
                         continue;
                     }
 
@@ -1141,192 +827,7 @@ Toxicity score: ${result.score}`
                     // Commands
                     // ====================================================
 
-                    if (
-                        text === "!tournament" ||
-                        text.startsWith("!tournament ")
-                    ) {
-                        if (!isGroup) {
-                            await reply(sock, msg, "Tournaments can only be used in a group.");
-                            continue;
-                        }
-
-                        const [, action, ...args] = text.trim().split(/\s+/);
-                        const tournament = getTournament(chatId);
-                        const usage = [
-                            `Usage: ${commandPrefix}tournament <create [points]|join|leave|start|status|cancel>`,
-                            `The creator is automatically entered and controls start/cancel.`
-                        ].join("\n");
-
-                        if (action === "create") {
-                            if (args.length > 1 || (args[0] && !/^[1-9]\d*$/.test(args[0]))) {
-                                await reply(sock, msg, usage);
-                                continue;
-                            }
-                            if (decryptGames.has(chatId)) {
-                                await reply(sock, msg, "Finish the current decrypt game before creating a tournament.");
-                                continue;
-                            }
-
-                            const maxPoints = args[0] ? Number(args[0]) : 3;
-                            if (!createTournament(chatId, senderJid, maxPoints)) {
-                                await reply(sock, msg, "A tournament already exists here, or the tournament settings are invalid.");
-                                continue;
-                            }
-
-                            await reply(
-                                sock,
-                                msg,
-                                `Tournament created. You are entered automatically. Others can join with ${commandPrefix}tournament join.`
-                            );
-                            continue;
-                        }
-
-                        if (action === "join") {
-                            if (args.length || !tournament) {
-                                await reply(sock, msg, tournament ? usage : "There is no tournament to join.");
-                                continue;
-                            }
-                            if (!joinTournament(chatId, senderJid)) {
-                                await reply(sock, msg, tournament.status === "lobby"
-                                    ? "You have already joined this tournament."
-                                    : "The tournament has already started; no more players can join.");
-                                continue;
-                            }
-
-                            await reply(sock, msg, "You joined the tournament.");
-                            continue;
-                        }
-
-                        if (action === "leave") {
-                            if (args.length || !tournament) {
-                                await reply(sock, msg, tournament ? usage : "There is no tournament to leave.");
-                                continue;
-                            }
-                            if (!leaveTournament(chatId, senderJid)) {
-                                await reply(sock, msg, senderJid === tournament.creatorId
-                                    ? `The creator cannot leave; use ${commandPrefix}tournament cancel instead.`
-                                    : "You can only leave a tournament lobby after joining.");
-                                continue;
-                            }
-
-                            await reply(sock, msg, "You left the tournament.");
-                            continue;
-                        }
-
-                        if (action === "start") {
-                            if (args.length || !tournament) {
-                                await reply(sock, msg, tournament ? usage : "There is no tournament to start.");
-                                continue;
-                            }
-                            if (senderJid !== tournament.creatorId) {
-                                await reply(sock, msg, "Only the tournament creator can start it.");
-                                continue;
-                            }
-                            if (tournament.status !== "lobby") {
-                                await reply(sock, msg, "The tournament is already running.");
-                                continue;
-                            }
-                            if (tournament.players.size < 2) {
-                                await reply(sock, msg, "At least two players must join before the tournament can start.");
-                                continue;
-                            }
-                            if (!getGroupSetting(chatId, "gamesEnabled")) {
-                                await reply(sock, msg, "A moderator has disabled games in this group.");
-                                continue;
-                            }
-                            if (decryptGames.has(chatId)) {
-                                await reply(sock, msg, "Finish the current decrypt game before starting the tournament.");
-                                continue;
-                            }
-
-                            tournament.status = "running";
-                            await startTournamentRound(sock, chatId);
-                            continue;
-                        }
-
-                        if (action === "status") {
-                            if (args.length || !tournament) {
-                                await reply(sock, msg, tournament ? usage : "There is no tournament in this group.");
-                                continue;
-                            }
-
-                            const standings = [...tournament.players]
-                                .map(playerId => ({
-                                    playerId,
-                                    score: tournament.scores.get(playerId) || 0
-                                }))
-                                .sort((first, second) => second.score - first.score)
-                                .map(({ playerId, score }) =>
-                                    `@${playerId.split("@")[0]}: ${score}`
-                                );
-                            const mentions = [...tournament.players];
-                            await sock.sendMessage(chatId, {
-                                text: [
-                                    `Tournament: ${tournament.status}`,
-                                    `First to ${tournament.maxPoints} points wins.`,
-                                    ...standings
-                                ].join("\n"),
-                                mentions
-                            });
-                            continue;
-                        }
-
-                        if (action === "cancel") {
-                            if (args.length || !tournament) {
-                                await reply(sock, msg, tournament ? usage : "There is no tournament to cancel.");
-                                continue;
-                            }
-                            if (senderJid !== tournament.creatorId) {
-                                await reply(sock, msg, "Only the tournament creator can cancel it.");
-                                continue;
-                            }
-
-                            endTournament(chatId);
-                            await reply(sock, msg, "The tournament was cancelled.");
-                            continue;
-                        }
-
-                        await reply(sock, msg, usage);
-                        continue;
-                    }
-
-                    // ----------------------------------------------------
-                    // !decrypt
-                    // ----------------------------------------------------
-
-                    if (text === "!decrypt") {
-                        if (!isGroup) {
-                            await reply(sock, msg, "The decrypt game can only be played in a group.");
-                            continue;
-                        }
-
-                        if (!getGroupSetting(chatId, "gamesEnabled")) {
-                            await reply(sock, msg, "A moderator has disabled games in this group.");
-                            continue;
-                        }
-
-                        if (getTournament(chatId)) {
-                            await reply(
-                                sock,
-                                msg,
-                                "A tournament is already being organized or played in this group."
-                            );
-                            continue;
-                        }
-
-                        const currentGame = decryptGames.get(chatId);
-                        if (currentGame) {
-                            await reply(
-                                sock,
-                                msg,
-                                currentGame.loading
-                                    ? "A decrypt game is starting. Please wait."
-                                    : "A decrypt game is already running in this group."
-                            );
-                            continue;
-                        }
-
-                        await startDecryptGame(sock, chatId);
+                    if (await games.handleCommand(sock, msg, { chatId, senderJid, text, isGroup, trusted, commandPrefix })) {
                         continue;
                     }
 
@@ -2265,7 +1766,7 @@ Toxicity score: ${result.score}`
                                 await reply(sock, msg, "Usage: !mod welcomeMsgEnabled <true|false>");
                                 continue;
                             }
-                            setGroupSetting(chatId, "welcomeMsgEnabled", value);
+                            setGroupSetting(chatId, "welcomeMsgEnabled", value === "true");
                             await reply(sock, msg, `welcomeMsgEnabled set to ${value}`);
                             continue;
                         }
@@ -2314,7 +1815,7 @@ Toxicity score: ${result.score}`
                     // this command is only available ONLY to trusted users, and has a lot of special features that we don't talk about :>
                     // aka a shit ton of subcommands
                     // ----------------------------------------------------
-                    if (
+                    else if (
                         text === "!commhelper" ||
                         text.startsWith("!commhelper ")
                     ) {
@@ -2757,12 +2258,6 @@ Toxicity score: ${result.score}`
                         "Error processing message:",
                         error
                     );
-
-                } finally {
-                    
-                    // Persist configuration after
-                    // every message execution.
-                    commandExecuted();
                 }
             }
         }
@@ -2774,4 +2269,14 @@ Toxicity score: ${result.score}`
 // Start
 // ============================================================
 
-startSock();
+// Load the storage backend (file by default; mysql, mariadb,
+// redis, postgres or supabase via STORAGE_BACKEND/STORAGE_URL)
+// before connecting, so config data is ready when messages
+// arrive.
+require("./storage")
+    .initStorage()
+    .then(startSock)
+    .catch(error => {
+        console.error("Storage init failed:", error);
+        process.exit(1);
+    });

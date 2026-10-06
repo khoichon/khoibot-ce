@@ -1,107 +1,22 @@
-const fs = require("fs");
-const path = require("path");
-
-const CONFIG_FILE = path.join(
-    __dirname,
-    "bot-config.json"
-);
-
-
 // ============================================================
-// Default configuration
+// Config access layer
 // ============================================================
+// Reads and mutates the in-memory document owned by the
+// write-behind store (storage/store.js), which handles
+// persistence to whichever backend is configured. All exported
+// functions stay synchronous — exactly as before.
 
-const defaultConfig = {
-    trusted: [],
-    enabledGroups: [],
-    groupSettings: {}
-};
+const store = require("./storage/store");
 
-
-let config;
-
-
-// ============================================================
-// Persistence
-// ============================================================
-
-function save() {
-    fs.writeFileSync(
-        CONFIG_FILE,
-        JSON.stringify(config, null, 4),
-        "utf8"
-    );
-}
+const {
+    defaultGroupSettings,
+    normalizeGroupSettings,
+    isValidBadwordlog
+} = require("./storage/normalize");
 
 
-function load() {
-
-    // Create config if it doesn't exist
-    if (!fs.existsSync(CONFIG_FILE)) {
-
-        config = structuredClone(
-            defaultConfig
-        );
-
-        save();
-
-        return;
-    }
-
-
-    try {
-
-        config = JSON.parse(
-            fs.readFileSync(
-                CONFIG_FILE,
-                "utf8"
-            )
-        );
-
-
-        // Make old config files compatible
-        config.trusted ??= [];
-        config.enabledGroups ??= [];
-        config.groupSettings ??= {};
-
-
-        // Make sure they're actually arrays/objects
-        if (!Array.isArray(config.trusted)) {
-            config.trusted = [];
-        }
-
-        if (!Array.isArray(config.enabledGroups)) {
-            config.enabledGroups = [];
-        }
-
-        if (
-            typeof config.groupSettings !== "object" ||
-            config.groupSettings === null ||
-            Array.isArray(config.groupSettings)
-        ) {
-            config.groupSettings = {};
-        }
-
-
-    } catch (error) {
-
-        console.error(
-            "Failed to load bot-config.json:"
-        );
-
-        console.error(error);
-
-        console.log(
-            "Using default configuration."
-        );
-
-
-        config = structuredClone(
-            defaultConfig
-        );
-
-        save();
-    }
+function getConfig() {
+    return store.getStoreDoc();
 }
 
 
@@ -110,7 +25,9 @@ function load() {
 // ============================================================
 
 function commandExecuted() {
-    save();
+    // Persistence is handled by the storage store's write-behind
+    // flusher; nothing to do per message anymore. Kept for
+    // compatibility with existing callers.
 }
 
 
@@ -124,7 +41,7 @@ function isTrusted(identifier) {
         return false;
     }
 
-    return config.trusted.includes(
+    return getConfig().trusted.includes(
         identifier
     );
 }
@@ -136,6 +53,7 @@ function addTrusted(identifier) {
         return false;
     }
 
+    const config = getConfig();
 
     if (
         config.trusted.includes(
@@ -150,7 +68,7 @@ function addTrusted(identifier) {
         identifier
     );
 
-    save();
+    store.markDirty({ immediate: true });
 
     return true;
 }
@@ -162,25 +80,22 @@ function removeTrusted(identifier) {
         return false;
     }
 
+    const config = getConfig();
 
     const oldLength =
         config.trusted.length;
-
 
     config.trusted =
         config.trusted.filter(
             id => id !== identifier
         );
 
-
     const changed =
         config.trusted.length !== oldLength;
 
-
     if (changed) {
-        save();
+        store.markDirty({ immediate: true });
     }
-
 
     return changed;
 }
@@ -189,7 +104,7 @@ function removeTrusted(identifier) {
 function getTrusted() {
 
     return [
-        ...config.trusted
+        ...getConfig().trusted
     ];
 }
 
@@ -204,8 +119,7 @@ function isGroupEnabled(groupId) {
         return false;
     }
 
-
-    return config.enabledGroups.includes(
+    return getConfig().enabledGroups.includes(
         groupId
     );
 }
@@ -217,6 +131,7 @@ function enableGroup(groupId) {
         return false;
     }
 
+    const config = getConfig();
 
     if (
         config.enabledGroups.includes(
@@ -231,7 +146,7 @@ function enableGroup(groupId) {
         groupId
     );
 
-    save();
+    store.markDirty({ immediate: true });
 
     return true;
 }
@@ -243,25 +158,22 @@ function disableGroup(groupId) {
         return false;
     }
 
+    const config = getConfig();
 
     const oldLength =
         config.enabledGroups.length;
-
 
     config.enabledGroups =
         config.enabledGroups.filter(
             id => id !== groupId
         );
 
-
     const changed =
         config.enabledGroups.length !== oldLength;
 
-
     if (changed) {
-        save();
+        store.markDirty({ immediate: true });
     }
-
 
     return changed;
 }
@@ -270,14 +182,16 @@ function disableGroup(groupId) {
 function getEnabledGroups() {
 
     return [
-        ...config.enabledGroups
+        ...getConfig().enabledGroups
     ];
 }
 
 
 function getConfigSnapshot() {
 
-    return structuredClone(config);
+    return structuredClone(
+        getConfig()
+    );
 }
 
 
@@ -291,59 +205,26 @@ function getGroupSettings(groupId) {
         return {};
     }
 
+    const config = getConfig();
 
-    // Create default settings
-    // for a group if necessary.
-    if (
-        !config.groupSettings[groupId]
-    ) {
+    // Normalize the stored settings (backfilling defaults and
+    // repairing old data) and only flag a write when something
+    // actually changed — steady-state reads write nothing.
+    //
+    // Note: returns the live object, as it always has; use
+    // getConfigSnapshot() for a deep copy.
+    const { settings, changed } =
+        normalizeGroupSettings(
+            config.groupSettings[groupId]
+        );
 
-        config.groupSettings[groupId] = {
-            antibadword: false,
-            badwordlog: "info",
-            welcomeMsgEnabled: false,
-            welcomeMsg: "Welcome to the group, [user]!",
-            gamesEnabled: true
-        };
+    config.groupSettings[groupId] = settings;
+
+    if (changed) {
+        store.markDirty();
     }
-        // Check all the config values and set defaults if necessary
-        if (
-            config.groupSettings[groupId].antibadword === undefined ||
-            typeof config.groupSettings[groupId].antibadword !== "boolean"
-        ) {
-            config.groupSettings[groupId].antibadword = false;
-        }
 
-        if (
-            config.groupSettings[groupId].gamesEnabled === undefined ||
-            typeof config.groupSettings[groupId].gamesEnabled !== "boolean"
-        ) {
-            config.groupSettings[groupId].gamesEnabled = true;
-        }
-
-        if (
-            config.groupSettings[groupId].welcomeMsgEnabled === undefined ||
-            typeof config.groupSettings[groupId].welcomeMsgEnabled !== "boolean"
-        ) {
-            config.groupSettings[groupId].welcomeMsgEnabled = false;
-        }
-
-        if (
-            config.groupSettings[groupId].welcomeMsg === undefined ||
-            typeof config.groupSettings[groupId].welcomeMsg !== "string"
-        ) {
-            config.groupSettings[groupId].welcomeMsg = "Welcome to the group, [user]!";
-        }
-
-        if (
-            config.groupSettings[groupId].badwordlog === undefined ||
-            !["silent", "info", "debug"].includes(config.groupSettings[groupId].badwordlog)
-        ) {
-            config.groupSettings[groupId].badwordlog = "info";
-        }
-        save();
-
-    return config.groupSettings[groupId];
+    return settings;
 }
 
 
@@ -354,7 +235,6 @@ function getGroupSetting(
 
     const settings =
         getGroupSettings(groupId);
-
 
     return settings[setting];
 }
@@ -370,44 +250,31 @@ function setGroupSetting(
         return false;
     }
 
+    const config = getConfig();
 
     if (
         !config.groupSettings[groupId]
     ) {
-
-        config.groupSettings[groupId] = {
-            antibadword: false,
-            badwordlog: "info",
-            welcomeMsgEnabled: false,
-            welcomeMsg: "Welcome to the group, [user]!",
-            gamesEnabled: true
-        };
+        config.groupSettings[groupId] =
+            defaultGroupSettings();
     }
 
     if (
         setting === "badwordlog" &&
-        !["silent", "info", "debug"].includes(value)
+        !isValidBadwordlog(value)
     ) {
         config.groupSettings[groupId].badwordlog = "info";
-        save();
+        store.markDirty({ immediate: true });
         return false;
     }
 
     config.groupSettings[groupId][setting] =
         value;
 
-
-    save();
+    store.markDirty({ immediate: true });
 
     return true;
 }
-
-
-// ============================================================
-// Load configuration
-// ============================================================
-
-load();
 
 
 // ============================================================

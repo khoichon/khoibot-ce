@@ -8,14 +8,21 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node index.js",
-    "dev": "nodemon index.js -- --dev"
+    "start": "node --env-file=.env index.js",
+    "dev": "nodemon --env-file=.env index.js -- --dev",
+    "migrate": "node --env-file=.env storage/migrate.js"
   },
   "dependencies": {
     "baileys": "^7.0.0-rc14",
+    "googleapis": "^174.0.1",
     "ollama": "^0.6.3",
     "qrcode-terminal": "^0.12.0",
     "sharp": "^0.35.4"
+  },
+  "optionalDependencies": {
+    "mysql2": "^3.11.0",
+    "ioredis": "^5.4.1",
+    "pg": "^8.12.0"
   },
   "allowScripts": {
     "baileys@7.0.0-rc14": true,
