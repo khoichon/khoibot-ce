@@ -1,3 +1,5 @@
+const { log } = require("./logging.js");
+
 async function getWeather(location = 'New York') {
   try {
     const response = await fetch(`https://wttr.in/${encodeURIComponent(location)}`, {
@@ -11,7 +13,7 @@ async function getWeather(location = 'New York') {
     
     return "```\n" + firstEightLines + "\n```";
   } catch (error) {
-    console.error('Error:', error);
+    log.error("weather", 'Error:', error);
   }
 }
 

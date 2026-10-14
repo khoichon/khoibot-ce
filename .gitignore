@@ -58,3 +58,8 @@ pids
 # OS Metadata
 .DS_Store
 Thumbs.db
+extras-state.json
+antiban-state.json
+ai-state.json
+games-state.json
+chatlog-state.json

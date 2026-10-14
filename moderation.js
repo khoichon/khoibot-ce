@@ -1,3 +1,5 @@
+const { betterLoggingEnabled } = require("./logging.js");
+
 const API_URL = "http://localhost:8000/api/v1/analyze";
 
 // Keep only the original odd lookalikes that aren't part of standard math blocks
@@ -19,9 +21,6 @@ function deobfuscate(text) {
 
 
 
-// Example usage in a bot event listener:
-const inputMessage = "hеllо սsеr"; // Contains Cyrillic 'е', 'о' and Armenian 'ս'
-const cleanMessage = deobfuscate(inputMessage);
 
 async function analyzeText(text) {
     const apiKey = process.env.BADWORD_API_KEY;
@@ -32,6 +31,8 @@ async function analyzeText(text) {
 
     const response = await fetch(API_URL, {
         method: "POST",
+        // dont wait forever if the model api hangs, errors already fail open
+        signal: AbortSignal.timeout(8000),
 
         headers: {
             "Content-Type": "application/json",
@@ -52,9 +53,16 @@ async function analyzeText(text) {
     return response.json();
 }
 
+// messages with nothing but numbers and basic punctuation (game answers, math)
+// cant be toxic, so we dont bother the model with them
 async function isToxic(text, threshold = 0.7) {
-    console.log(`Analyzing text: ${deobfuscate(text)}`);
-    const result = await analyzeText(deobfuscate(text));
+    const cleaned = deobfuscate(text);
+    if (!/[^0-9 .,!?+*/=%()-]/.test(cleaned)) {
+        return { toxic: false, score: 0, scores: {} };
+    }
+
+    if (!betterLoggingEnabled()) console.log("Analyzing text: " + cleaned);
+    const result = await analyzeText(cleaned);
 
     return {
         toxic: result.scores.toxicity >= threshold,
