@@ -48,7 +48,7 @@ function defaultGroupSettings() {
         badwordlog: "info",
         welcomeMsgEnabled: false,
         welcomeMsg: DEFAULT_WELCOME_MSG,
-        gamesEnabled: true,
+        gamesenabled: true,
         // !ai imagine is off in every chat until a trusted user turns it on
         aiImagine: false,
         // deletes messages with links in them
@@ -75,10 +75,12 @@ function defaultGroupSettings() {
         warncurses: null,
         // how many minutes that window lasts, null means the WARN_CURSES_TIME_DEFAULT from .env is used
         warncursestime: null,
-        // tags: for trusted-only people to control, and allows them to change the enabled and sensitive features of khoibot (like !duty)
+        // tags: for trusted-only people to control, and allows them to change the enabled and sensitive features of khoibot
         tags: [],
         // the edgy ai personality preset stays hidden until a group turns it on with !mod edgypreset
-        edgypreset: false
+        edgypreset: false,
+        // antibadword's "if this is incorrect, please report it" if it is enabled or nah
+        antibadwordreport: false
     };
 }
 
@@ -131,8 +133,8 @@ function normalizeGroupSettings(raw) {
     settings.antibadwordnosay =
         coerceBoolean(raw.antibadwordnosay, false);
 
-    settings.gamesEnabled =
-        coerceBoolean(raw.gamesEnabled, true);
+    settings.gamesenabled =
+        coerceBoolean(raw.gamesenabled ?? raw.gamesEnabled, true);
 
     settings.aiImagine =
         coerceBoolean(raw.aiImagine, false);
@@ -200,11 +202,20 @@ function normalizeGroupSettings(raw) {
     settings.edgypreset =
         coerceBoolean(raw.edgypreset, false);
 
+    settings.tags = Array.isArray(raw.tags)
+        ? raw.tags.filter(tag => typeof tag === "string" && tag.trim() !== "")
+        : [];
+
+    settings.antibadwordreport = coerceBoolean(raw.antibadwordreport, false);
+
     for (const key of Object.keys(raw)) {
         if (!(key in settings)) {
             settings[key] = raw[key];
         }
     }
+
+    // the old camelCase key isnt used anymore so we drop it
+    delete settings.gamesEnabled;
 
 
     return {

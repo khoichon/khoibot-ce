@@ -55,9 +55,13 @@ By default every link is blocked. `!mod linkwhitelist add <domain>` makes except
 
 - `!ai story <idea>` writes a short story with a twist, for example `!ai story <prompt>`. It uses the same model as `!ai` chat, so with `USE_DESKTOP_AI=1` it runs on the desktop and otherwise on the Pi. The idea can be up to 200 characters, and the story doesn't touch the chat memory.
 
+## Choosing the AI model
+
+`!ai model <name>` picks which model a chat uses, and `!ai <name> <prompt>` uses one for a single prompt. `!ai model default` goes back to the model from `DESKTOP_AI_MODEL` and `LOCAL_AI_MODEL`. The names and models come from `AI_MODELS` in `.env`, written as `name=desktop model|local model` with commas between names, for example `AI_MODELS=qwen=qwen3:14b|qwen3:1.7b,llama=llama3.1:8b|llama3.2:1b`. The first model is used when the desktop answers and the second when the Pi does. If you give only one model it is used for both. Every model has to be pulled with `ollama pull` on the machine that will use it. (important!!!) The names `model`, `default`, `reset`, `personality`, `story` and `imagine` are taken. Without `AI_MODELS` the bot offers qwen, llama and gemma.
+
 ## Personality presets
 
-`!ai personality preset <name>` sets a ready made personality for the chat, for example `!ai personality preset pirate`. `!ai personality preset` lists the names, which are auntie, caveman, detective, grandma, kdrama, pirate, rapper, robot, shakespeare, singlish, tigermum and yoda. A preset is saved and cleared the same way as a custom personality, with `!ai personality reset`.
+`!ai personality preset <name>` sets a ready made personality for the chat, for example `!ai personality preset pirate`. `!ai personality preset` lists the names, which are auntie, caveman, detective, edgy, grandma, kdrama, pirate, rapper, robot, shakespeare, singlish, tigermum and yoda. A preset is saved and cleared the same way as a custom personality, with `!ai personality reset`. The edgy preset swears and makes crude jokes, so only use it in chats where that is fine. *cough* (this may not be suitable for group chats with children under an age idk)
 
 ## Games
 
@@ -101,6 +105,10 @@ The rest are for managing a group. Trusted users and group admins only, and the 
 
 The bot can also warn people by itself when their messages keep getting deleted for cursing. `!mod warncurses <number>` is how many deleted messages it takes (0 turns it off), and `!mod warncursestime <minutes>` is how long the count lasts (1 to 60). The count is per person, starts at their first deleted message, and goes back to 0 when the time is up. Once it goes past the number they get a warning, and then another for each further deleted message in the same window. It works like `!warn`, so it counts toward `warnlimit` and trusted users and admins are skipped. It needs `ENABLE_EXTRA_COMMANDS=1` and the bot has to be a group admin, since it only counts messages it really deleted. The starting numbers for every group come from `WARN_CURSES_DEFAULT` and `WARN_CURSES_TIME_DEFAULT` in `.env` (5 and 5 if they aren't set), and the counts are forgotten when the bot restarts.
 
+## Direct messages
+
+Commands are off in DMs by default, so the bot ignores everyone except trusted users. A trusted user turns them on for one person with `!mod dmtoggle <number>`, from any chat. Use the full number with the country code, like `6591234567`. Running it again turns them off. If a DM stays silent after you switch it on, WhatsApp may be showing that chat under a hidden ID instead of the phone number.
+
 ## Force banned numbers
 
 A phone number can be force banned so that it can never use the bot, in any chat, including private messages. Commands and game answers from that number are ignored without any reply. Moderation such as the anti-badword filter still applies to them in groups. Trusted users can't be force banned.
@@ -125,7 +133,7 @@ Numbers added from chat are saved in `extras-state.json`. Numbers from `.env` ca
 
 Trusted users can change things on the fly, and the changes are kept in `antiban-state.json`:
 
-- `!antiban` shows the status, and `!antiban perminute <n>`, `!antiban perhour <n>` and `!antiban reset` change the rate limits.
+- `!antiban` shows the status, `!antiban banrisk` shows just the ban risk, and `!antiban perminute <n>`, `!antiban perhour <n>` and `!antiban reset` change the rate limits.
 - `!messagedelay set <min> <max>` changes the delay, `set 0 0` turns it off, and `!messagedelay reset` restores the default. `!messagecooldown <normal> <heavy>` changes the cooldowns, and `!messagecooldown on` or `off` switches them. `!plot`, `!pfp`, `!whoami` and `!animsticker` each take `setcooldown <seconds>` of their own.
 - `!bot on` and `!bot off` stop or resume all sending, and while it's off, commands from other users are ignored.
 

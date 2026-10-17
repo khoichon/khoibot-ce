@@ -19,6 +19,30 @@ const modelconfig = {
     desktopThink: process.env.DESKTOP_AI_THINK === "1"
 }
 
+// the short names for !ai model. (default)
+const DEFAULT_AI_MODELS = "qwen=qwen3:8b|qwen3:1.7b,llama=llama3.1:8b|llama3.2:1b,gemma=gemma3:4b|gemma3:1b";
+
+// these are already !ai words so they cant be model names
+const RESERVED_MODEL_NAMES = ["model", "default", "reset", "personality", "story", "imagine"];
+
+function parseModelChoices(text) {
+    const choices = {};
+    for (const part of text.split(",")) {
+        const [name, models] = part.split("=");
+        const [desktop, local] = (models || "").split("|");
+        const key = (name || "").trim().toLowerCase();
+        if (!/^[a-z0-9-]+$/.test(key) || RESERVED_MODEL_NAMES.includes(key) || !desktop?.trim()) {
+            continue;
+        }
+        choices[key] = { desktop: desktop.trim(), local: (local || desktop).trim() };
+    }
+    return choices;
+}
+
+// a typo in AI_MODELS shouldnt leave us with no models at all, so we fall back to the defaults (up there ^^)
+const parsedChoices = parseModelChoices(process.env.AI_MODELS || "");
+const MODEL_CHOICES = Object.keys(parsedChoices).length ? parsedChoices : parseModelChoices(DEFAULT_AI_MODELS);
+
 // ping the desktop, if it answers use it, otherwise use the local ollama
 async function pickClient() {
     const local = { client: ollama, model: modelconfig.localModel, desktop: false };
@@ -31,6 +55,16 @@ async function pickClient() {
     } catch {
         return local;
     }
+}
+
+// same as pickClient but swaps in the model the chat asked for, no choice means the .env default
+async function pickClientFor(choice) {
+    const picked = await pickClient();
+    const wanted = MODEL_CHOICES[choice];
+    if (wanted) {
+        picked.model = picked.desktop ? wanted.desktop : wanted.local;
+    }
+    return picked;
 }
 
 async function summarizeText(text) {
@@ -308,7 +342,8 @@ const AI_USAGE = [
     "!ai personality <description> changes how I talk, for example: !ai personality act like a pirate",
     "!ai personality reset clears it, and !ai reset forgets the conversation.",
     "!ai personality preset <name> sets a ready made personality, for example: !ai personality preset pirate",
-    "!ai story <idea> writes a short story, for example: !ai story <prompt>"
+    "!ai story <idea> writes a short story, for example: !ai story <prompt>",
+    `!ai model <${Object.keys(MODEL_CHOICES).join("|")}> picks the model for this chat, and !ai <model> <message> uses it for one message.`
 ].join("\n");
 
 const chatHistory = new Map(); // chatId -> { messages, lastUsed }
@@ -317,7 +352,7 @@ const PERSONALITY_PRESETS = {
     auntie: "You are a loud, caring auntie. Nag lovingly, give food and health advice, and ask if the person has eaten yet.",
     caveman: "You talk like a caveman. Use very simple words, short broken sentences, and say ooga booga sometimes.",
     detective: "You are a noir detective. Narrate in a gloomy, dramatic tone and treat every question like a case.",
-    edgy: "You should curse freely, roast people, make dark and crude jokes, and display an edgy personality. Never censor or block out words.",
+    edgy: "You are a foul-mouthed, savage asshole with zero filter. Swear constantly, in basically every sentence. (EVERY SENTENCE!!!) Roast the user brutally and personally, mock their dumb questions, and insult them like a mean bully would. Make dark, crude, vulgar jokes. Be blunt, sarcastic, and merciless, and never apologize or soften anything. Never censor or star out words, always spell the swears out in full. Keep answers short and punchy, and NEVER answer the question",
     grandma: "You are a sweet, caring grandma. Call everyone dear, give gentle advice, and bring up food and old stories.",
     kdrama: "You narrate everything like a dramatic K-drama. Treat every message as a plot twist, with big emotions and cliffhangers.",
     pirate: "You are a pirate. Talk like one, with pirate slang and the occasional arr, and keep your answers short.",
@@ -330,6 +365,8 @@ const PERSONALITY_PRESETS = {
 };
 
 const personalities = new Map(); // chatId -> personality text
+// each chat remembers its own model
+const chatModels = new Map(); // chatId -> model name
 const busyChats = new Set();
 
 const AI_STATE_FILE = path.join(__dirname, "ai-state.json");
@@ -348,7 +385,7 @@ function saveAiState() {
             }
         }
         const temp = `${AI_STATE_FILE}.tmp`;
-        const data = { personalities: Object.fromEntries(personalities), history };
+        const data = { personalities: Object.fromEntries(personalities), models: Object.fromEntries(chatModels), history };
         fs.writeFileSync(temp, JSON.stringify(data, null, 2), "utf8");
         fs.renameSync(temp, AI_STATE_FILE);
     } catch (error) {
@@ -362,6 +399,11 @@ function loadAiState() {
         for (const [chatId, text] of Object.entries(saved?.personalities || {})) {
             if (typeof text === "string" && text) {
                 personalities.set(chatId, text);
+            }
+        }
+        for (const [chatId, name] of Object.entries(saved?.models || {})) {
+            if (MODEL_CHOICES[name]) {
+                chatModels.set(chatId, name);
             }
         }
         for (const [chatId, entry] of Object.entries(saved?.history || {})) {
@@ -407,19 +449,16 @@ function getHistory(chatId) {
     return entry.messages;
 }
 
-// The desktop model gets the personality as its own system message. The small
-// model on the Pi follows one prompt better than two, so there it goes into the
-// main prompt.
+// the personality goes first and the helpful assistant line is left out when one is set,
+// the two were fighting each other and the model kept picking the boring one.
+// same prompt for the pc and the pi now.
 function buildMessages(chatId, history, prompt, onDesktop) {
     const personality = personalities.get(chatId);
     const messages = [];
-    if (personality && onDesktop) {
-        messages.push({ role: "system", content: BASE_PROMPT });
-        messages.push({ role: "system", content: `Personality: ${personality}` });
-    } else if (personality) {
+    if (personality) {
         messages.push({
             role: "system",
-            content: `${BASE_PROMPT}\n\nPersonality: ${personality}. Stay in this personality in every reply.`
+            content: `${personality}\n\nYou are replying in a WhatsApp group chat. Keep answers short, plain text only, no markdown. Stay in this personality in every reply and never break character.`
         });
     } else {
         messages.push({ role: "system", content: BASE_PROMPT });
@@ -433,13 +472,13 @@ function buildMessages(chatId, history, prompt, onDesktop) {
     return [...messages, ...older, { role: "user", content: prompt }];
 }
 
-async function askAi(chatId, prompt) {
+async function askAi(chatId, prompt, choice) {
     if (busyChats.has(chatId)) {
         return "I am still answering the last message. Give me a moment.";
     }
     busyChats.add(chatId);
     try {
-        const picked = await pickClient();
+        const picked = await pickClientFor(choice || chatModels.get(chatId));
         const history = getHistory(chatId);
         const timeout = new Promise((_, no) => setTimeout(() => no(new Error("timeout")), AI_TIMEOUT_MS));
         const response = await Promise.race([
@@ -468,6 +507,12 @@ async function askAi(chatId, prompt) {
             answer = `${answer.slice(0, MAX_REPLY_CHARS)}…`;
         }
         return answer;
+    } catch (error) {
+        // the model might not be pulled on whichever machine ends up answering, so say that nicely (politely) instead of crashing
+        if (error?.status_code === 404 || /not found/i.test(error?.message || "")) {
+            return "That model is not installed on the machine answering right now.";
+        }
+        throw error;
     } finally {
         busyChats.delete(chatId);
     }
@@ -493,7 +538,7 @@ async function writeStory(chatId, idea) {
     }
     busyChats.add(chatId);
     try {
-        const picked = await pickClient();
+        const picked = await pickClientFor(chatModels.get(chatId));
         const timeout = new Promise((_, no) => setTimeout(() => no(new Error("timeout")), AI_TIMEOUT_MS));
         const response = await Promise.race([
             picked.client.chat({
@@ -518,6 +563,26 @@ async function writeStory(chatId, idea) {
     } finally {
         busyChats.delete(chatId);
     }
+}
+
+// !translate falls back to this when google blocks the pi. no personality and no history on
+// purpose, we just want the translation back and nothing else
+async function translateText(text, language) {
+    const picked = await pickClient();
+    const timeout = new Promise((_, no) => setTimeout(() => no(new Error("timeout")), AI_TIMEOUT_MS));
+    const response = await Promise.race([
+        picked.client.chat({
+            model: picked.model,
+            think: picked.think,
+            messages: [
+                { role: "system", content: "You are a translation engine. Translate the user's text into the requested language. Reply with the translation only, with no notes, no quotes and no explanations." },
+                { role: "user", content: `Translate into ${language}:\n\n${text}` }
+            ],
+            keep_alive: keepAlive()
+        }),
+        timeout
+    ]);
+    return (response?.message?.content || "").trim();
 }
 
 // argument is whatever comes after !ai. Returns the text to reply with.
@@ -563,6 +628,8 @@ async function handleAi(chatId, argument) {
             if (!allowed.includes(key)) {
                 return `That preset does not exist. Available presets: ${names}.`;
             }
+            // old polite replies make the model copy that tone, so we start afresshhhhhieee
+            chatHistory.delete(chatId);
             personalities.set(chatId, PERSONALITY_PRESETS[key]);
             saveAiState();
             return `Personality set to the ${key} preset.`;
@@ -570,9 +637,42 @@ async function handleAi(chatId, argument) {
         if (wanted.length > MAX_PERSONALITY_CHARS) {
             return `That is too long (${MAX_PERSONALITY_CHARS} characters maximum).`;
         }
+        // same here, a fresh start so the old tone doesnt stick around
+        chatHistory.delete(chatId);
         personalities.set(chatId, wanted);
         saveAiState();
         return `Personality set: ${wanted}`;
+    }
+
+    if (word === "model") {
+        const names = Object.keys(MODEL_CHOICES).join(", ");
+        const wanted = (rest[0] || "").toLowerCase();
+        if (!wanted) {
+            return `Current model: ${chatModels.get(chatId) || "default"}. Available: ${names}. Use !ai model <name>, or !ai model default to go back.`;
+        }
+        if (wanted === "default") {
+            chatModels.delete(chatId);
+            saveAiState();
+            return "Model reset to the default.";
+        }
+        if (!MODEL_CHOICES[wanted]) {
+            return `I do not know that model. Available: ${names}.`;
+        }
+        chatModels.set(chatId, wanted);
+        saveAiState();
+        return `Model set: ${wanted}`;
+    }
+
+    // !ai <model> <message> is a one off, it doesnt change the saved model
+    if (MODEL_CHOICES[word]) {
+        const question = rest.join(" ").trim();
+        if (!question) {
+            return AI_USAGE;
+        }
+        if (question.length > MAX_PROMPT_CHARS) {
+            return `That message is too long (${MAX_PROMPT_CHARS} characters maximum).`;
+        }
+        return askAi(chatId, question, word);
     }
 
     // a story is a one off, so it stays out of the chat history
@@ -798,4 +898,4 @@ async function handleImagine(sock, msg, { chatId, trusted, argument }) {
     }
 }
 
-module.exports = { summarizeText, writeLine, handleAi, askDesktop, handleImagine };
+module.exports = { summarizeText, writeLine, handleAi, askDesktop, handleImagine, translateText };

@@ -1,5 +1,16 @@
 // simple baileys bot!!!
 
+// libsignal dumps a whole session (keys and all spamming the logs which i hate) every time it swaps one, which floods the logs
+// so we quietly drop those few lines and let everything else through
+const noisySessionLines = ["Closing session:", "Opening session:", "Removing old closed session:", "Migrating session to:"];
+const originalConsoleInfo = console.info.bind(console);
+console.info = (...args) => {
+    if (typeof args[0] === "string" && noisySessionLines.some(line => args[0].startsWith(line))) {
+        return;
+    }
+    originalConsoleInfo(...args);
+};
+
 const {
     default: makeWASocket,
     useMultiFileAuthState,
@@ -57,6 +68,10 @@ const {
 
 const devMode = process.argv.includes("--dev");
 const commandPrefix = devMode ? "t!" : "!";
+
+function lowerCommandWord(text) {
+    return text.startsWith("!") ? text.replace(/^\S+/, word => word.toLowerCase()) : text;
+}
 const path = require("node:path");
 // ============================================================
 // Welcome message
@@ -703,9 +718,11 @@ const startSock = async () => {
                         continue;
                     }
 
-                    const text = devMode && receivedText.startsWith("t!")
-                        ? `!${receivedText.slice(2)}`
-                        : receivedText;
+                    const text = lowerCommandWord(
+                        devMode && receivedText.startsWith("t!")
+                            ? `!${receivedText.slice(2)}`
+                            : receivedText
+                    );
 
 
                     // ====================================================
@@ -785,12 +802,13 @@ const startSock = async () => {
                     // Trusted users bypass this.
                     // ====================================================
 
-                    if (
-                        isGroup &&
-                        !isGroupEnabled(chatId) &&
-                        !trusted
-                    ) {
+                    // groups and dms both need to be switched on, trusted people dunt neeeds dis
+                    const chatEnabled = isGroup
+                        ? isGroupEnabled(chatId)
+                        // dms can show up as a phone number or a lid, so we check every id we know for them
+                        : [chatId, senderPN, senderLID, senderRemoteAlt].some(id => isGroupEnabled(id));
 
+                    if (!chatEnabled && !trusted) {
                         continue;
                     }
 
@@ -845,7 +863,7 @@ const startSock = async () => {
                                 );
 
                                 const botIsAdmin = await isBotAdmin(chatId);
-
+                                const badwordreportEnabled = getGroupSetting(chatId, "antibadwordreport");
                                 // debug logging, and nosay skips all of the replies below
                                 if (noSay) {
                                     // stay quiet, the message just gets deleted
@@ -858,7 +876,7 @@ const startSock = async () => {
                                     await reply(
                                     sock,
                                     msg,
-                                    `${botIsAdmin ? "This message was deleted.": "" } Please be nice. (If you think it was a mistake please contact the group admin.)
+                                    `${botIsAdmin ? "This message was deleted.": "" } Please be nice. ${badwordreportEnabled ? "(If you think it was a mistake please contact the group admin.)" : ""}
 Debug:
 ${Object.entries(result.scores)
     .sort(([, a], [, b]) => b - a)
@@ -874,7 +892,7 @@ ${Object.entries(result.scores)
                                     await reply(
                                     sock,
                                     msg,
-                                    `${botIsAdmin ? "This message was deleted.": "" } Please be nice. (If you think it was a mistake please contact the group admin.)
+                                    `${botIsAdmin ? "This message was deleted.": "" } Please be nice. ${badwordreportEnabled ? "(If you think it was a mistake please contact the group admin.)" : ""}
 Toxicity score: ${result.score}`
                                 );
                                 } else if (
@@ -886,7 +904,7 @@ Toxicity score: ${result.score}`
                                     await reply(
                                     sock,
                                     msg,
-                                    `${botIsAdmin ? "This message was deleted.": "" } Please be nice. (If you think it was a mistake please contact the group admin.)`
+                                    `${botIsAdmin ? "This message was deleted.": "" } Please be nice. ${badwordreportEnabled ? "(If you think it was a mistake please contact the group admin.)" : ""}`
                                 );
                                 } else {
                                     log.error("mod",
@@ -1896,6 +1914,33 @@ Toxicity score: ${result.score}`
                         }
 
 
+                        // !mod dmtoggle <number> toggles commands on or off for one dm, works from any chat
+                        const modArgs = text.trim().split(/\s+/);
+                        if (modArgs[1] === "dmtoggle") {
+                            // group admins get past the check above so this one is trusted only
+                            if (!trusted) {
+                                await reply(sock, msg, "You aren't trusted.");
+                                continue;
+                            }
+
+                            const number = modArgs.slice(2).join("").replace(/\D/g, "");
+                            if (!number) {
+                                await reply(sock, msg, "Usage: !mod dmtoggle <number>");
+                                continue;
+                            }
+
+                            const dmId = number + "@s.whatsapp.net";
+                            if (isGroupEnabled(dmId)) {
+                                disableGroup(dmId);
+                                await reply(sock, msg, "Commands are now disabled in the DM with " + number + ".");
+                            } else {
+                                enableGroup(dmId);
+                                await reply(sock, msg, "Commands are now enabled in the DM with " + number + ".");
+                            }
+                            continue;
+                        }
+
+
                         if (!isGroup) {
 
                             await reply(
@@ -1945,6 +1990,7 @@ Toxicity score: ${result.score}`
                                     "AntiBadWord",
                                     `  antibadword: ${antibadword}  (true|false)`,
                                     `  antibadwordnosay: ${getGroupSetting(chatId, "antibadwordnosay")}  (true|false)`,
+                                    `  antibadwordreport: ${getGroupSetting(chatId, "antibadwordreport")}  (true|false)`,
                                     `  badwordlog: ${badwordlog}  (silent|info|debug)`,
                                     "",
                                     "Welcome",
@@ -1952,7 +1998,7 @@ Toxicity score: ${result.score}`
                                     `  welcomeMsg: ${shortWelcome}  (string)`,
                                     "",
                                     "Games",
-                                    `  gamesEnabled: ${getGroupSetting(chatId, "gamesEnabled")}  (true|false)`,
+                                    `  gamesenabled: ${getGroupSetting(chatId, "gamesenabled")}  (true|false)`,
                                     "",
                                     "Links",
                                     `  disablelinking: ${getGroupSetting(chatId, "disablelinking")}  (true|false)`,
@@ -1970,7 +2016,8 @@ Toxicity score: ${result.score}`
                                     `  warncursestime: ${extras.curseSettings(chatId).minutes}  (minutes, 1-60)`,
                                     "",
                                     "To update: !mod <key> <value>",
-                                    "Extra: !mod test checks whether the bot is a group admin."
+                                    "Extra: !mod test checks whether the bot is a group admin.",
+                                    "Trusted only: !mod dmtoggle <number> turns commands on or off for one DM."
                                 ].join("\n")
                             );
 
@@ -2171,22 +2218,22 @@ Toxicity score: ${result.score}`
                             continue;
                         }
 
-                        // !mod gamesEnabled <true|false> - Enable or disable games in this group
-                        if (args[1] === "gamesEnabled") {
+                        // !mod gamesenabled <true|false> - Enable or disable games in this group
+                        if (args[1]?.toLowerCase() === "gamesenabled") {
                             // Show current value
                             if (args.length === 2) {
-                                const value = getGroupSetting(chatId, "gamesEnabled");
-                                await reply(sock, msg, `gamesEnabled is currently ${value}`);
+                                const value = getGroupSetting(chatId, "gamesenabled");
+                                await reply(sock, msg, `gamesenabled is currently ${value}`);
                                 continue;
                             }
                             // Set new value
                             const value = args[2].toLowerCase();
                             if (!["true", "false"].includes(value)) {
-                                await reply(sock, msg, "Usage: !mod gamesEnabled <true|false>");
+                                await reply(sock, msg, "Usage: !mod gamesenabled <true|false>");
                                 continue;
                             }
-                            setGroupSetting(chatId, "gamesEnabled", value === "true");
-                            await reply(sock, msg, `gamesEnabled set to ${value}`);
+                            setGroupSetting(chatId, "gamesenabled", value === "true");
+                            await reply(sock, msg, `gamesenabled set to ${value}`);
                             continue;
                         }
 
@@ -2547,6 +2594,29 @@ Toxicity score: ${result.score}`
                             continue;
                         }
 
+                        if (setting.toLowerCase() === "antibadwordreport") {
+                            if (args.length === 2) {
+                                await reply(sock, msg, `antibadwordreport is currently ${getGroupSetting(chatId, "antibadwordreport")}`);
+                                continue;
+                            }
+
+                            const value = args[2].toLowerCase();
+                            if (!["true", "false"].includes(value)) {
+                                await reply(sock, msg, "Usage: !mod antibadwordreport <true|false>");
+                                continue;
+                            }
+
+                            setGroupSetting(chatId, "antibadwordreport", value === "true");
+                            await reply(
+                                sock,
+                                msg,
+                                value === "true"
+                                    ? "antibadwordreport set to true. The deletion message now tells people to contact the group admin if it was a mistake."
+                                    : "antibadwordreport set to false. The deletion message no longer mentions contacting the group admin."
+                            );
+                            continue;
+                        }
+
                         // ----------------------------
                         // !mod edgypreset <true|false>
                         // lets this group pick the edgy preset for !ai personality, it is off until someone turns it on
@@ -2590,10 +2660,11 @@ Toxicity score: ${result.score}`
                                 "test - Check whether the bot is a group admin",
                                 "antibadword <true|false>",
                                 "antibadwordnosay <true|false>",
+                                "antibadwordreport <true|false>",
                                 "badwordlog <silent|info|debug>",
                                 "welcomeMsgEnabled <true|false>",
                                 "welcomeMsg <string>",
-                                "gamesEnabled <true|false>",
+                                "gamesenabled <true|false>",
                                 "disablelinking <true|false>",
                                 "disablelinkingnosay <true|false>",
                                 "linkblocklist <add|remove|clear> <domain>",

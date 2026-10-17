@@ -910,7 +910,7 @@ async function handleMessageCooldown(sock, msg, { text, trusted, commandPrefix }
     await reply(sock, msg, `The command cooldown has been set to ${normal} seconds, or ${heavy} seconds for heavy commands.`);
 }
 
-// !antiban [perminute <n> | perhour <n> | reset]
+// !antiban [banrisk | perminute <n> | perhour <n> | reset]
 async function handleStatus(sock, msg, { text, trusted, commandPrefix }) {
     if (!trusted) {
         await reply(sock, msg, "Only trusted users may use this command.");
@@ -925,6 +925,16 @@ async function handleStatus(sock, msg, { text, trusted, commandPrefix }) {
         saveState();
         const { perMinute, perHour } = limits();
         await sayNow(sock, msg, `The message limits have been restored to their defaults (${perMinute} per minute, ${perHour} per hour).`);
+        return;
+    }
+
+    // just the ban risk line, nothing else phew
+    if (action === "banrisk") {
+        if (!plusEnabled()) {
+            await sayNow(sock, msg, "Ban risk tracking is turned off. Set ENABLE_ANTIBAN_PLUS=1 to use it.");
+            return;
+        }
+        await sayNow(sock, msg, `Ban risk: ${riskScore()}/100 (${riskLevel()})`);
         return;
     }
 
@@ -949,7 +959,7 @@ async function handleStatus(sock, msg, { text, trusted, commandPrefix }) {
     }
 
     if (action) {
-        await sayNow(sock, msg, `Usage: ${commandPrefix}antiban [perminute <number> | perhour <number> | reset]`);
+        await sayNow(sock, msg, `Usage: ${commandPrefix}antiban [banrisk | perminute <number> | perhour <number> | reset]`);
         return;
     }
 

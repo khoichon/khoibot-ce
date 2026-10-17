@@ -358,12 +358,30 @@ async function handleTranslate(sock, msg, { text, commandPrefix }) {
         return;
     }
 
+    if (toTranslate.length > 1500) {
+        await reply(sock, msg, "That text is too long (1500 characters maximum).");
+        return;
+    }
+
+    const code = LANG_ALIASES[language.toLowerCase()] || language.toLowerCase();
     try {
-        const code = LANG_ALIASES[language.toLowerCase()] || language.toLowerCase();
-        const data = await fetchJsonWithRetry(
-            `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(code)}&dt=t&q=${encodeURIComponent(toTranslate)}`
+        // one singleeee try, google blocking us wont fix itself in a second so no retry here
+        const data = await fetchJson(
+            `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(code)}&dt=t&q=${encodeURIComponent(toTranslate)}`,
+            5000
         );
         await reply(sock, msg, data[0].map(part => part[0]).join(""));
+        return;
+    } catch {
+        // google blocks the pi a lot, so the local ai takes over from here bleh
+    }
+
+    try {
+        const translated = await aitools.translateText(toTranslate, language);
+        if (!translated) {
+            throw new Error("empty translation");
+        }
+        await reply(sock, msg, translated);
     } catch {
         await reply(sock, msg, "The translation failed. Please check the language and try again.");
     }

@@ -698,7 +698,7 @@ function armTimer(sock, games, groupId, game, ms, message, revealAnswer, key = "
     game[key].unref?.();
 }
 
-// Games follow the group's gamesEnabled setting. Group-only games say no in DMs.
+// Games follow the group's gamesenabled setting. Group-only games say no in DMs.
 async function gameAllowed(sock, msg, { chatId, isGroup }, groupOnlyLabel = null) {
     if (!isGroup) {
         if (groupOnlyLabel) {
@@ -708,7 +708,7 @@ async function gameAllowed(sock, msg, { chatId, isGroup }, groupOnlyLabel = null
         return true;
     }
 
-    if (!getGroupSetting(chatId, "gamesEnabled")) {
+    if (!getGroupSetting(chatId, "gamesenabled")) {
         await reply(sock, msg, "A moderator has disabled games in this group.");
         return false;
     }
@@ -2376,7 +2376,7 @@ async function handleAnswer(sock, msg, { chatId, senderJid, text }) {
     }
 
     // Turning games off in a group also stops the extra games already running there.
-    if (extraGamesEnabled() && getGroupSetting(chatId, "gamesEnabled")) {
+    if (extraGamesEnabled() && getGroupSetting(chatId, "gamesenabled")) {
         if (await handleTttMove(sock, chatId, senderJid, text)) return true;
         if (await handleNumGuessAnswer(sock, msg, chatId, senderJid, text)) return true;
         if (await handleAnagramAnswer(sock, msg, chatId, senderJid, text)) return true;
@@ -2501,7 +2501,7 @@ async function handleCommand(sock, msg, { chatId, senderJid, text, isGroup, trus
                 await reply(sock, msg, "At least two players must join before the tournament can start.");
                 return true;
             }
-            if (!getGroupSetting(chatId, "gamesEnabled")) {
+            if (!getGroupSetting(chatId, "gamesenabled")) {
                 await reply(sock, msg, "A moderator has disabled games in this group.");
                 return true;
             }
@@ -2584,7 +2584,7 @@ async function handleCommand(sock, msg, { chatId, senderJid, text, isGroup, trus
             return true;
         }
 
-        if (!getGroupSetting(chatId, "gamesEnabled")) {
+        if (!getGroupSetting(chatId, "gamesenabled")) {
             await reply(sock, msg, "A moderator has disabled games in this group.");
             return true;
         }
@@ -2628,7 +2628,7 @@ async function handleCommand(sock, msg, { chatId, senderJid, text, isGroup, trus
             return true;
         }
 
-        if (!getGroupSetting(chatId, "gamesEnabled")) {
+        if (!getGroupSetting(chatId, "gamesenabled")) {
             await reply(sock, msg, "A moderator has disabled games in this group.");
             return true;
         }
