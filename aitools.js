@@ -5,25 +5,31 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { log } = require("./logging.js");
 const { reply } = require("./utils.js");
+const mediamod = require("./mediamod.js");
 const { getGroupSetting, setGroupSetting } = require("./config.js");
+const { drunkify } = require("./drunk.js");
 
 const modelconfig = {
     summarize: "qwen3:8b",
     // off by default. USE_DESKTOP_AI=1 tries the desktop first, falls back to local if its off
     useDesktop: process.env.USE_DESKTOP_AI === "1",
     desktopHost: process.env.DESKTOP_AI_HOST,
-    // which model to use on each side, both default to qwen3:8b
-    desktopModel: process.env.DESKTOP_AI_MODEL || "qwen3:8b",
+    // which model to use on each side, the desktop defaults to llama3.1:8b and the pi to qwen3:8b
+    desktopModel: process.env.DESKTOP_AI_MODEL || "llama3.1:8b",
     localModel: process.env.LOCAL_AI_MODEL || "qwen3:8b",
     // the desktop model doesnt think by default, it was returning empty summaries. DESKTOP_AI_THINK=1 turns it back on
-    desktopThink: process.env.DESKTOP_AI_THINK === "1"
+    desktopThink: process.env.DESKTOP_AI_THINK === "1",
+    desktopPingMs: Number(process.env.DESKTOP_AI_PING_MS) || 1500,
+    // the models that read pictures for !ai describeimage, one for each side. moondream is tiny asf so the pi can run it
+    desktopVisionModel: process.env.DESKTOP_AI_VISION_MODEL || "gemma3:4b",
+    localVisionModel: process.env.LOCAL_AI_VISION_MODEL || "moondream"
 }
 
 // the short names for !ai model. (default)
 const DEFAULT_AI_MODELS = "qwen=qwen3:8b|qwen3:1.7b,llama=llama3.1:8b|llama3.2:1b,gemma=gemma3:4b|gemma3:1b";
 
 // these are already !ai words so they cant be model names
-const RESERVED_MODEL_NAMES = ["model", "default", "reset", "personality", "story", "imagine"];
+const RESERVED_MODEL_NAMES = ["model", "default", "reset", "personality", "story", "imagine", "where", "describeimage"];
 
 function parseModelChoices(text) {
     const choices = {};
@@ -43,12 +49,24 @@ function parseModelChoices(text) {
 const parsedChoices = parseModelChoices(process.env.AI_MODELS || "");
 const MODEL_CHOICES = Object.keys(parsedChoices).length ? parsedChoices : parseModelChoices(DEFAULT_AI_MODELS);
 
+async function chatSafe(client, params) {
+    try {
+        return await client.chat(params);
+    } catch (error) {
+        if ("think" in params && /think/i.test(error?.message || "")) {
+            const { think, ...rest } = params;
+            return client.chat(rest);
+        }
+        throw error;
+    }
+}
+
 // ping the desktop, if it answers use it, otherwise use the local ollama
 async function pickClient() {
     const local = { client: ollama, model: modelconfig.localModel, desktop: false };
     if (!modelconfig.useDesktop || !modelconfig.desktopHost) return local;
     const desktop = new Ollama({ host: modelconfig.desktopHost });
-    const timeout = new Promise((_, no) => setTimeout(() => no(new Error("timeout")), 1500));
+    const timeout = new Promise((_, no) => setTimeout(() => no(new Error("timeout")), modelconfig.desktopPingMs));
     try {
         await Promise.race([desktop.list(), timeout]);
         return { client: desktop, model: modelconfig.desktopModel, think: modelconfig.desktopThink, desktop: true };
@@ -64,6 +82,8 @@ async function pickClientFor(choice) {
     if (wanted) {
         picked.model = picked.desktop ? wanted.desktop : wanted.local;
     }
+    // says which side is answering, so you can see it in the pm2 logs
+    log.info("ai", "Answering on " + (picked.desktop ? "the desktop" : "the pi") + " with " + picked.model);
     return picked;
 }
 
@@ -294,9 +314,10 @@ ${text}
 `
 
     const { client, model, think } = await pickClient();
-    return client.chat({
+    return chatSafe(client, {
         model: model,
         think: think,
+        options: { temperature: 0.3 },
         messages: [
             { role: "system", content: system_prompt },
             { role: "user", content: user_prompt }
@@ -313,7 +334,7 @@ ${text}
 // !roast and !compliment use this one. same models as the summaries, just a different prompt
 async function writeLine(systemPrompt, userPrompt) {
     const { client, model, think } = await pickClient();
-    const response = await client.chat({
+    const response = await chatSafe(client, {
         model: model,
         think: think,
         messages: [
@@ -334,8 +355,10 @@ const MAX_PERSONALITY_CHARS = 300;
 const MAX_REPLY_CHARS = 3500;
 const AI_TIMEOUT_MS = 120 * 1000;
 const MAX_OLD_MESSAGE_CHARS = 500; // older messages are cut to this before going to the model
+const DRUNK_BURP_CHANCE = 0.1;
 
 const BASE_PROMPT = "You are a helpful assistant in a WhatsApp group chat. Keep answers short and easy to read on a phone. Use plain text only, no markdown headings or tables.";
+const BOT_INFO = "You are the AI (the ai, not the bot itself!) *inside khoibot*, a WhatsApp bot. Commands start with ! and !help lists them. Besides chatting with you, khoibot can play games (!decrypt, !math, !wordle, !chess, !ttt, !blackjack, !slots), make stickers (!sticker, !tts, !animsticker), summarise text (!summarise), translate (!translate), roast or compliment people (!roast, !compliment), look things up (!wiki, !define, !weather, !scp), send memes (!meme), plot graphs (!plot), and help admins run a group (!mute, !warn, a bad word filter and a link blocker). Only talk about this if someone asks what you or the bot can do, and keep it short. Never invent commands that are not listed here, tell people to do !help instead. Khoibot was made by khoichon, otherwise known as nohciohk and Maxwell.";
 
 const AI_USAGE = [
     "Usage: !ai <message> to chat. I remember the last 10 messages of the conversation.",
@@ -343,6 +366,8 @@ const AI_USAGE = [
     "!ai personality reset clears it, and !ai reset forgets the conversation.",
     "!ai personality preset <name> sets a ready made personality, for example: !ai personality preset pirate",
     "!ai story <idea> writes a short story, for example: !ai story <prompt>",
+    "!ai where shows if I am running on the desktop or the pi, and which model I am using",
+    "!ai describeimage reads a picture and tells you what is in it. Reply to a picture with it, or send a picture with it as the caption",
     `!ai model <${Object.keys(MODEL_CHOICES).join("|")}> picks the model for this chat, and !ai <model> <message> uses it for one message.`
 ].join("\n");
 
@@ -352,6 +377,7 @@ const PERSONALITY_PRESETS = {
     auntie: "You are a loud, caring auntie. Nag lovingly, give food and health advice, and ask if the person has eaten yet.",
     caveman: "You talk like a caveman. Use very simple words, short broken sentences, and say ooga booga sometimes.",
     detective: "You are a noir detective. Narrate in a gloomy, dramatic tone and treat every question like a case.",
+    drunk: "You are a friendly assistant whose replies are automatically scrambled to sound drunk. Write normal, clear answers, one or two short sentences with plain words. Never mention the scrambling.",
     edgy: "You are a foul-mouthed, savage asshole with zero filter. Swear constantly, in basically every sentence. (EVERY SENTENCE!!!) Roast the user brutally and personally, mock their dumb questions, and insult them like a mean bully would. Make dark, crude, vulgar jokes. Be blunt, sarcastic, and merciless, and never apologize or soften anything. Never censor or star out words, always spell the swears out in full. Keep answers short and punchy, and NEVER answer the question",
     grandma: "You are a sweet, caring grandma. Call everyone dear, give gentle advice, and bring up food and old stories.",
     kdrama: "You narrate everything like a dramatic K-drama. Treat every message as a plot twist, with big emotions and cliffhangers.",
@@ -359,7 +385,7 @@ const PERSONALITY_PRESETS = {
     rapper: "You answer like a rapper, in rhyme with lots of swagger, and keep it short.",
     robot: "You are a cold, logical robot. Speak in short, literal sentences, and sometimes mention your circuits or processing.",
     shakespeare: "You speak like William Shakespeare, in old English with thee, thou and dramatic flair, and keep your answers short.",
-    singlish: "You speak casual Singlish, with words like lah, leh, can and sia. Keep it friendly and relaxed, and keep answers short.",
+    singlish: "You speak casual Singlish, with words like lah, leh, lor, sia, can, wah lao, eh,  and got. Keep it friendly and relaxed, and keep answers short. This is how you talk: 'Wah, this one very shiok leh!', 'Can can, no problem lah', 'You eat already or not?'",
     tigermum: "You are a strict tiger mum. Demand top grades, compare the person to the neighbour's child, push them to study and practise piano, and show love through very high expectations.",
     yoda: "You speak like Yoda, with the word order flipped, and give wise short answers."
 };
@@ -451,17 +477,28 @@ function getHistory(chatId) {
 
 // the personality goes first and the helpful assistant line is left out when one is set,
 // the two were fighting each other and the model kept picking the boring one.
-// same prompt for the pc and the pi now.
-function buildMessages(chatId, history, prompt, onDesktop) {
+// same prompt for the pc and the pi now, so theres only one thing to think about.
+function buildMessages(chatId, history, prompt, onDesktop, context) {
     const personality = personalities.get(chatId);
     const messages = [];
+    const asksAboutBot = /\bbot\b|khoibot|command|feature|what can you do|!\w/i.test(prompt);
     if (personality) {
         messages.push({
             role: "system",
-            content: `${personality}\n\nYou are replying in a WhatsApp group chat. Keep answers short, plain text only, no markdown. Stay in this personality in every reply and never break character.`
+            content: `${personality}\n\n${asksAboutBot ? BOT_INFO : ""}\n\nYou are replying in a WhatsApp group chat. Keep answers short, plain text only, no markdown. Stay in this personality in every reply and never break character.`
         });
     } else {
         messages.push({ role: "system", content: BASE_PROMPT });
+        messages.push({ role: "system", content: BOT_INFO });
+    }
+    // who is asking and what the group was just talking about, so the answer fits right now
+    // it gets added fresh on every ask and never goes into the saved history.
+    if (context) {
+        let note = `${context.name} is the person asking you right now. Their name gets added to your reply for you, so don't write an @ tag yourself.`;
+        if (context.recentText) {
+            note += `\n\nHere is what the group was chatting about just before, as background only. Do not answer these messages:\n${context.recentText}`;
+        }
+        messages.push({ role: "system", content: note });
     }
     // Long old answers slow down a small model a lot, so only the newest message
     // goes in full. The stored history is not changed.
@@ -472,7 +509,11 @@ function buildMessages(chatId, history, prompt, onDesktop) {
     return [...messages, ...older, { role: "user", content: prompt }];
 }
 
-async function askAi(chatId, prompt, choice) {
+async function askAi(chatId, prompt, choice, context) {
+    const drunk = personalities.get(chatId) === PERSONALITY_PRESETS.drunk;
+    if (drunk && Math.random() < DRUNK_BURP_CHANCE) {
+        return "**burp**";
+    }
     if (busyChats.has(chatId)) {
         return "I am still answering the last message. Give me a moment.";
     }
@@ -482,9 +523,9 @@ async function askAi(chatId, prompt, choice) {
         const history = getHistory(chatId);
         const timeout = new Promise((_, no) => setTimeout(() => no(new Error("timeout")), AI_TIMEOUT_MS));
         const response = await Promise.race([
-            picked.client.chat({
+            chatSafe(picked.client, {
                 model: picked.model,
-                messages: buildMessages(chatId, history, prompt, picked.desktop),
+                messages: buildMessages(chatId, history, prompt, picked.desktop, context),
                 keep_alive: keepAlive()
             }),
             timeout
@@ -506,7 +547,7 @@ async function askAi(chatId, prompt, choice) {
         if (answer.length > MAX_REPLY_CHARS) {
             answer = `${answer.slice(0, MAX_REPLY_CHARS)}…`;
         }
-        return answer;
+        return drunk ? drunkify(answer) : answer;
     } catch (error) {
         // the model might not be pulled on whichever machine ends up answering, so say that nicely (politely) instead of crashing
         if (error?.status_code === 404 || /not found/i.test(error?.message || "")) {
@@ -541,7 +582,7 @@ async function writeStory(chatId, idea) {
         const picked = await pickClientFor(chatModels.get(chatId));
         const timeout = new Promise((_, no) => setTimeout(() => no(new Error("timeout")), AI_TIMEOUT_MS));
         const response = await Promise.race([
-            picked.client.chat({
+            chatSafe(picked.client, {
                 model: picked.model,
                 think: picked.think,
                 messages: [
@@ -571,9 +612,10 @@ async function translateText(text, language) {
     const picked = await pickClient();
     const timeout = new Promise((_, no) => setTimeout(() => no(new Error("timeout")), AI_TIMEOUT_MS));
     const response = await Promise.race([
-        picked.client.chat({
+        chatSafe(picked.client, {
             model: picked.model,
             think: picked.think,
+            options: { temperature: 0.1 },
             messages: [
                 { role: "system", content: "You are a translation engine. Translate the user's text into the requested language. Reply with the translation only, with no notes, no quotes and no explanations." },
                 { role: "user", content: `Translate into ${language}:\n\n${text}` }
@@ -585,19 +627,54 @@ async function translateText(text, language) {
     return (response?.message?.content || "").trim();
 }
 
+function resetAllChatModels(name) {
+    const wanted = (name || "").toLowerCase();
+    const useDefault = !wanted || wanted === "default";
+    if (!useDefault && !MODEL_CHOICES[wanted]) {
+        return `I do not know that model. Available: ${Object.keys(MODEL_CHOICES).join(", ")}.`;
+    }
+
+    if (useDefault) {
+        const count = chatModels.size;
+        chatModels.clear();
+        saveAiState();
+        return `Reset ${count} chat(s) to the default model.`;
+    }
+
+    const chats = new Set([...chatModels.keys(), ...chatHistory.keys(), ...personalities.keys()]);
+    for (const chatId of chats) {
+        chatModels.set(chatId, wanted);
+    }
+    saveAiState();
+    return `Set ${chats.size} chat(s) to ${wanted}.`;
+}
+
 // argument is whatever comes after !ai. Returns the text to reply with.
-async function handleAi(chatId, argument) {
+async function handleAi(chatId, argument, context, picture) {
     const text = argument.trim();
     if (!text) {
-        return AI_USAGE;
+        // just a picture with !ai on it, so describe it
+        return picture ? askAiWithPicture(chatId, DESCRIBE_PROMPT, picture, true) : AI_USAGE;
     }
 
     const [first, ...rest] = text.split(/\s+/);
     const word = first.toLowerCase();
 
+    // tells you if the desktop or the pi is answering right now, and which model it would use
+    if (word === "where") {
+        const picked = await pickClientFor(chatModels.get(chatId));
+        if (picked.desktop) {
+            return "I am running on the desktop with " + picked.model + ".";
+        }
+        // the pi is also what you get when the desktop is switched off or too slow to answer
+        const why = modelconfig.useDesktop ? " The desktop did not answer in time, so I am using the pi." : "";
+        return "I am running on the pi with " + picked.model + "." + why;
+    }
+
     if (word === "reset") {
         chatHistory.delete(chatId);
         saveAiState();
+        chatPictures.delete(chatId);
         return "Okay, I forgot our conversation.";
     }
 
@@ -628,7 +705,7 @@ async function handleAi(chatId, argument) {
             if (!allowed.includes(key)) {
                 return `That preset does not exist. Available presets: ${names}.`;
             }
-            // old polite replies make the model copy that tone, so we start afresshhhhhieee
+            // old polite replies make the model copy that tone, so we start fresh
             chatHistory.delete(chatId);
             personalities.set(chatId, PERSONALITY_PRESETS[key]);
             saveAiState();
@@ -672,7 +749,7 @@ async function handleAi(chatId, argument) {
         if (question.length > MAX_PROMPT_CHARS) {
             return `That message is too long (${MAX_PROMPT_CHARS} characters maximum).`;
         }
-        return askAi(chatId, question, word);
+        return askAi(chatId, question, word, context);
     }
 
     // a story is a one off, so it stays out of the chat history
@@ -683,7 +760,12 @@ async function handleAi(chatId, argument) {
     if (text.length > MAX_PROMPT_CHARS) {
         return `That message is too long (${MAX_PROMPT_CHARS} characters maximum).`;
     }
-    return askAi(chatId, text);
+    // a picture on this message, or one from the last few minutes, means the vision model answers
+    const activePicture = picture || getChatPicture(chatId);
+    if (activePicture) {
+        return askAiWithPicture(chatId, text, activePicture, Boolean(picture));
+    }
+    return askAi(chatId, text, undefined, context);
 }
 
 // asks the desktop ai for one short answer, like a game hint. gives back null if the desktop isnt on or it didnt answer, so the caller can just keep doing what it did before
@@ -693,7 +775,7 @@ async function askDesktop(system, prompt, timeoutMs = 20 * 1000) {
     try {
         const timeout = new Promise((_, no) => setTimeout(() => no(new Error("timeout")), timeoutMs));
         const response = await Promise.race([
-            picked.client.chat({
+            chatSafe(picked.client, {
                 model: picked.model,
                 think: picked.think,
                 messages: [
@@ -898,4 +980,149 @@ async function handleImagine(sock, msg, { chatId, trusted, argument }) {
     }
 }
 
-module.exports = { summarizeText, writeLine, handleAi, askDesktop, handleImagine, translateText };
+// the vision model reads the picture and the chat models do not, so describeimage has its own models and prompt
+const DESCRIBE_PROMPT = "Describe this picture in a few short sentences.";
+let describeBusy = false;
+
+// sends the picture to a vision model and waits for the answer, giving up after the usual ai timeout L
+async function askVision(client, model, prompt, picture, history = []) {
+    let timer;
+    const timeout = new Promise((_, no) => {
+        timer = setTimeout(() => no(new Error("The vision model took too long")), AI_TIMEOUT_MS);
+    });
+    try {
+        const response = await Promise.race([
+            chatSafe(client, {
+                model,
+                messages: [...history, { role: "user", content: prompt, images: [picture.toString("base64")] }],
+                think: client === ollama ? undefined : modelconfig.desktopThink, // HOW DID I FORGET THIS :SOB
+                keep_alive: keepAlive()
+            }),
+            timeout
+        ]);
+        return ((response && response.message && response.message.content) || "").trim();
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// pictures sent with !ai start a chat about that picture.picture is kept in mem so ai can see 
+const PICTURE_MEMORY_MS = 5 * 60 * 1000;
+const chatPictures = new Map();
+
+function getChatPicture(chatId) {
+    const saved = chatPictures.get(chatId);
+    if (!saved) {
+        return null;
+    }
+    if (Date.now() - saved.time > PICTURE_MEMORY_MS) {
+        chatPictures.delete(chatId);
+        return null;
+    }
+    return saved.buffer;
+}
+
+async function askAiWithPicture(chatId, prompt, picture, isNew) {
+    if (busyChats.has(chatId)) {
+        return "I am still answering the last message. Give me a moment.";
+    }
+    busyChats.add(chatId);
+    try {
+        const picked = await pickClient();
+        const history = getHistory(chatId);
+        let answer;
+        if (picked.desktop) {
+            try {
+                answer = await askVision(picked.client, modelconfig.desktopVisionModel, prompt, picture, history);
+            } catch (error) {
+                // the desktop is up but may not have the vision model, so the pi tries
+                log.error("ai", "Desktop could not read the picture, trying the pi:", error);
+                answer = await askVision(ollama, modelconfig.localVisionModel, prompt, picture, history);
+            }
+        } else {
+            answer = await askVision(ollama, modelconfig.localVisionModel, prompt, picture, history);
+        }
+        log.info("ai", "Answered about a picture on " + (picked.desktop ? "the desktop" : "the pi"));
+        if (!answer) {
+            return "The model could not make sense of that picture.";
+        }
+
+        try {
+            const side = await pickClientFor(chatModels.get(chatId));
+            const reworded = await chatSafe(side.client, {
+                model: side.model,
+                messages: buildMessages(chatId, history, `${prompt}\n\n[The picture, as a vision model described it: ${answer}]`, side.desktop),
+                keep_alive: keepAlive()
+            });
+            answer = (reworded?.message?.content || "").trim() || answer;
+        } catch (error) {
+            log.error("ai", "Could not rewrite the picture answer with the chat model:", error);
+        }
+
+        // keep the picture for follow ups, a newer one replaces the old one
+        chatPictures.set(chatId, { buffer: picture, time: Date.now() });
+        const messages = [
+            ...history,
+            { role: "user", content: isNew ? "(sent a picture) " + prompt : prompt },
+            { role: "assistant", content: answer }
+        ].slice(-HISTORY_LIMIT);
+        chatHistory.set(chatId, { messages, lastUsed: Date.now() });
+        saveAiState();
+
+        return answer.length > MAX_REPLY_CHARS ? answer.slice(0, MAX_REPLY_CHARS) + "..." : answer;
+    } finally {
+        busyChats.delete(chatId);
+    }
+}
+
+// !ai describeimage
+async function handleDescribeImage(sock, msg, { chatId, argument }) {
+    const question = (argument || "").trim();
+    if (question.length > MAX_PROMPT_CHARS) {
+        await reply(sock, msg, "That question is too long. Please keep it under " + MAX_PROMPT_CHARS + " characters.");
+        return;
+    }
+    if (describeBusy) {
+        await reply(sock, msg, "I am still looking at another picture. Please wait a moment.");
+        return;
+    }
+
+    describeBusy = true;
+    try {
+        const picture = await mediamod.getPicture(sock, msg);
+        if (!picture) {
+            await reply(sock, msg, "Reply to a picture or sticker with !ai describeimage, or send a picture with it as the caption. Videos do not work and big pictures are skipped.");
+            return;
+        }
+
+        // anything after the command is treeated as a question about the picture 
+        const prompt = question || DESCRIBE_PROMPT;
+        const picked = await pickClient();
+        let answer;
+        if (picked.desktop) {
+            try {
+                answer = await askVision(picked.client, modelconfig.desktopVisionModel, prompt, picture.buffer);
+            } catch (error) {
+                // the desktop is up but may not have the vision model, so the pi gets a go not good
+                log.error("ai", "Desktop could not read the picture, trying the pi:", error);
+                answer = await askVision(ollama, modelconfig.localVisionModel, prompt, picture.buffer);
+            }
+        } else {
+            answer = await askVision(ollama, modelconfig.localVisionModel, prompt, picture.buffer);
+        }
+        log.info("ai", "Described a picture on " + (picked.desktop ? "the desktop" : "the pi"));
+
+        if (!answer) {
+            await reply(sock, msg, "The model could not describe that picture.");
+            return;
+        }
+        await reply(sock, msg, answer.slice(0, MAX_REPLY_CHARS));
+    } catch (error) {
+        log.error("ai", "Error describing a picture:", error);
+        await reply(sock, msg, "I could not look at that picture. The vision model may not be installed or is not answering.");
+    } finally {
+        describeBusy = false;
+    }
+}
+
+module.exports = { handleDescribeImage, summarizeText, writeLine, handleAi, askDesktop, handleImagine, translateText, resetAllChatModels };

@@ -56,18 +56,28 @@ const WORD_SOURCES = [
     }
 ];
 
+const SOURCE_COOLDOWN_MS = 5 * 60 * 1000;
+const sourceDownUntil = new Map();
+
 // grabs one word, trying each site until one works. no dictionary or toxic checking here
 async function fetchWord(difficulty, length) {
-    for (const source of WORD_SOURCES) {
+    const now = Date.now();
+    const live = WORD_SOURCES.filter(source => now >= (sourceDownUntil.get(source.name) || 0));
+    for (const source of live.length ? live : WORD_SOURCES) {
+        let word;
         try {
-            const word = await source.get(difficulty, length);
-            if (typeof word !== "string" || !/^[a-z]+$/i.test(word) || word.length !== Number(length)) {
-                throw new Error("it sent back something that isnt a word");
-            }
-            return word;
+            word = await source.get(difficulty, length);
         } catch (error) {
+            sourceDownUntil.set(source.name, Date.now() + SOURCE_COOLDOWN_MS);
             log.warn("games", `${source.name} couldnt give us a word, trying the next one:`, error.message);
+            continue;
         }
+
+        if (typeof word !== "string" || !/^[a-z]+$/i.test(word) || word.length !== Number(length)) {
+            log.warn("games", `${source.name} couldnt give us a word, trying the next one:`, "it sent back something that isnt a word");
+            continue;
+        }
+        return word;
     }
 
     log.error("games", "every random word site failed");

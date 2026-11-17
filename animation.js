@@ -183,6 +183,40 @@ async function videoToWebp(input, { ffmpeg = "ffmpeg" } = {}) {
 }
 
 
+// turns a gif into an mp4
+async function gifToMp4(input, { ffmpeg = "ffmpeg" } = {}) {
+    if (input.length > VIDEO_MAX_INPUT_BYTES) {
+        const error = new Error("The gif is too large.");
+        error.code = "TOO_LARGE";
+        throw error;
+    }
+
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "memevid-"));
+    const source = path.join(dir, "input.gif");
+    const target = path.join(dir, "output.mp4");
+
+    try {
+        await fs.promises.writeFile(source, input);
+
+        const args = ["-y", "-v", "error", "-i", source, "-an", "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart", target];
+
+        try {
+            await run(ffmpeg, args, FFMPEG_TIMEOUT_MS);
+        } catch (error) {
+            if (error.code === "ENOENT") {
+                error.code = "NO_FFMPEG";
+            }
+            throw error;
+        }
+
+        return await fs.promises.readFile(target);
+    } finally {
+        await fs.promises.rm(dir, { recursive: true, force: true });
+    }
+}
+
 // ---------- One job at a time ----------
 
 let busy = false;
@@ -212,5 +246,6 @@ module.exports = {
     framesToWebp,
     slideshowToWebp,
     videoToWebp,
+    gifToMp4,
     exclusive
 };

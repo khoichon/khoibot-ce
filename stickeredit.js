@@ -9,7 +9,7 @@
 //
 // Several operations can be chained with | and run from left to right.
 // parse() turns the command into operations or an error message, render()
-// draws the operations on an image, and renderGrid() makes the grid picture.
+// draws the operations on an image, and renderGrid() makes the grid picture. (long explanation, i know sorry)
 
 const SIZE = 512;
 const MAX_OPERATIONS = 8;
@@ -28,6 +28,9 @@ function normalizeColor(raw) {
         return null;
     }
     let color = raw.trim().toLowerCase();
+    if (color === "brown") {
+        return "#654321"; // the svg brown is more of a red, so this one is a proper brown
+    }
     if (NAMED_COLORS.has(color)) {
         return color;
     }

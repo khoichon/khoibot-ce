@@ -1,38 +1,33 @@
 # khoibotv4 - Community Edition
 
-## Setup instructions
+## Getting it running
 
-1. Go to `detoxify/` and uvicorn the API shown there. (Optional, for moderation) (configurable in `moderation.js`)
-2. Clone [This repository](https://github.com/roowus/Jetphotos-API) and run it, port should be 8787 (configurable in `index.js`)
-3. Optionally, have Ollama running. By default, uses `qwen3:8b`. Feel free to change this (configurable in `aitools.js`)
-   (Optional) If you have a desktop running Ollama, set `USE_DESKTOP_AI=1` and `DESKTOP_AI_HOST=http://<desktop ip>:11434`. It tries the desktop first and falls back to the local Ollama if the desktop is off. Off by default. `DESKTOP_AI_MODEL` and `LOCAL_AI_MODEL` set the model used on each side (both default to `qwen3:8b`). The desktop model does not think by default, set `DESKTOP_AI_THINK=1` to turn it back on.
-4. Just run the code. Do not use `npm run dev` (use `npm start` instead). Doing so will clash with my existing development environment.
+1. (Optional, for moderation) Go to `detoxify/` and uvicorn the API there. The address can be changed in `moderation.js`. It loads the multilingual Detoxify model by default. Set `BADWORD_MODEL=textdetox` to use the textdetox model instead, which handles Chinese and Japanese better but needs more memory and is a little slower.
+2. Clone [This repository](https://github.com/roowus/Jetphotos-API) and run it. It should be on port 8787, which can be changed in `index.js`.
+3. (Optional) Run Ollama for the AI features. It uses `qwen3:8b` by default, and you can swap that in `aitools.js`. If you have a desktop running Ollama, set `USE_DESKTOP_AI=1` and `DESKTOP_AI_HOST=http://<desktop ip>:11434`, and it'll try the desktop first and fall back to the local one when the desktop is off. `DESKTOP_AI_MODEL`, `LOCAL_AI_MODEL` and `DESKTOP_AI_THINK` tune that side of things.
+4. Just run the code with `npm start`. Please don't use `npm run dev`, it clashes with my own development setup.
+
+Most of what's below is optional. Each feature has a flag in `.env` and stays off until you set it to `1`, apart from a few of the logging ones that work the other way round. `.env.example` lists the lot, along with the numbers you can tweak.
 
 ## Storage
 
-The bot's persisted data (trusted users, enabled groups, per-group settings) lives in one config document that can be stored in any supported backend. Pick one with `STORAGE_BACKEND` and `STORAGE_URL` in `.env`:
+Trusted users, enabled groups and per-group settings all live in one config document. It's a plain JSON file by default, but it can be in a database instead. Pick one with `STORAGE_BACKEND` and `STORAGE_URL` in `.env`:
 
 | Backend | `STORAGE_BACKEND` | `STORAGE_URL` example | Driver |
 |---|---|---|---|
-| JSON file (default) | `file` | *(none needed; optional path or `file:///...`)* | built-in |
-| MySQL | `mysql` | `mysql://user:pass@localhost:3306/khoibot` | `mysql2` |
-| MariaDB | `mariadb` | `mariadb://user:pass@localhost:3306/khoibot` | `mysql2` |
+| JSON file (default) | `file` | not needed, or a path | built-in |
+| MySQL / MariaDB | `mysql`, `mariadb` | `mysql://user:pass@localhost:3306/khoibot` | `mysql2` |
 | Redis | `redis` | `redis://localhost:6379/0` (`rediss://` for TLS) | `ioredis` |
-| Postgres | `postgres` | `postgres://user:pass@host:5432/postgres` | `pg` |
-| Supabase | `supabase` | connection string from *Project Settings → Database* | `pg` |
+| Postgres / Supabase | `postgres`, `supabase` | `postgres://user:pass@host:5432/postgres` (Supabase gives you one under *Project Settings → Database*) | `pg` |
 
-The SQL backends create their table automatically on startup; no manual schema setup. Redis keys live under a `khoibot:v1` prefix (configurable with `STORAGE_REDIS_PREFIX`).
-
-### Moving data between backends
-
-`npm run migrate` (or `node storage/migrate.js`) transfers the config between any two backends, verifying the copy afterwards:
+The SQL backends make their own table on startup, so there's no schema to set up, and Redis keys go under the `khoibot:v1` prefix (`STORAGE_REDIS_PREFIX` changes it). `npm run migrate` (or `node storage/migrate.js`) copies the config between any two backends and checks it afterwards:
 
 ```
 node storage/migrate.js --from file --to mysql --to-url mysql://user:pass@localhost:3306/khoibot --yes
 node storage/migrate.js --from redis --from-url redis://localhost:6379/0 --to supabase --to-url postgres://...
 ```
 
-`--from` defaults to `file`; omitted URLs fall back to `STORAGE_URL`. The destination is fully **replaced**, so a non-empty one asks for confirmation (or pass `--yes`). `--dry-run` previews the transfer without writing. A plain file backup: `node storage/migrate.js --from file --to file --to-url backup.json --yes`.
+`--from` defaults to `file`, and a missing URL falls back to `STORAGE_URL`. The destination gets completely replaced, so the script asks first unless you pass `--yes`, and `--dry-run` shows what would happen without writing. A plain backup is just a file to file copy.
 
 ## Link blocker
 
@@ -59,25 +54,33 @@ By default every link is blocked. `!mod linkwhitelist add <domain>` makes except
 
 `!ai model <name>` picks which model a chat uses, and `!ai <name> <prompt>` uses one for a single prompt. `!ai model default` goes back to the model from `DESKTOP_AI_MODEL` and `LOCAL_AI_MODEL`. The names and models come from `AI_MODELS` in `.env`, written as `name=desktop model|local model` with commas between names, for example `AI_MODELS=qwen=qwen3:14b|qwen3:1.7b,llama=llama3.1:8b|llama3.2:1b`. The first model is used when the desktop answers and the second when the Pi does. If you give only one model it is used for both. Every model has to be pulled with `ollama pull` on the machine that will use it. (important!!!) The names `model`, `default`, `reset`, `personality`, `story` and `imagine` are taken. Without `AI_MODELS` the bot offers qwen, llama and gemma.
 
+A group admin can switch the AI off for one chat with `!mod toggleai false`, and back on with `!mod toggleai true`. `!mod toggleai` on its own flips whatever it is now. It covers `!ai` and all of its subcommands, and it is on by default.
+
+The bot also tells the model who is asking and, in a group, roughly what the last few messages were about, so `!ai` can follow the conversation instead of answering each question cold.
+
 ## Personality presets
 
-`!ai personality preset <name>` sets a ready made personality for the chat, for example `!ai personality preset pirate`. `!ai personality preset` lists the names, which are auntie, caveman, detective, edgy, grandma, kdrama, pirate, rapper, robot, shakespeare, singlish, tigermum and yoda. A preset is saved and cleared the same way as a custom personality, with `!ai personality reset`. The edgy preset swears and makes crude jokes, so only use it in chats where that is fine. *cough* (this may not be suitable for group chats with children under an age idk)
+`!ai personality preset <name>` sets a ready made personality for the chat, for example `!ai personality preset pirate`. `!ai personality preset` lists the names, which are auntie, caveman, detective, drunk, edgy, grandma, kdrama, pirate, rapper, robot, shakespeare, singlish, tigermum and yoda. A preset is saved and cleared the same way as a custom personality, with `!ai personality reset`. The edgy preset swears and makes crude jokes, so only use it in chats where that is fine. *cough* The drunk preset garbles every answer in code, and sometimes the bot just burps instead of answering.
+
+`!mod drunkmode true` makes every text reply the bot sends in that chat come out drunk, and `!mod drunkmode false` sobers it up again. `!mod drunkmode` on its own flips it. `!drunkify <text>` does the same garbling to any text you give it.
 
 ## Games
 
-- `!decrypt` starts a word game and `!math` an arithmetic one. Both are saved in `games-state.json`, so a restart doesn't wipe them.
+- `!decrypt` starts a word game and `!math [easy|medium|hard|impossible|asian]` an arithmetic and algebra one (the difficulty is random if you leave it out, and impossible and asian only happen  up when you ask for it). Both are saved in `games-state.json`, so a restart doesn't wipe them.
+- `!math cancel` ends the game, and only whoever started it or a trusted user can do that. There is a cooldown between `!math` games in a group, 20 seconds by default, and you can change it with `MATH_COOLDOWN_SECONDS` in `.env` (0 turns it off). A game also ends by itself if nobody gets it in time: 60 seconds for easy, 90 for medium, 2 minutes for hard, 3 for impossible and 5 for asian. >:D
 - Hints are limited to 2 per game. The first one only works after a short wait from when the game starts, and each one after that waits a bit since the last hint. Both waits are 30 seconds by default, and you can change them with `HINT_START_DELAY_SECONDS` and `HINT_COOLDOWN_SECONDS` in `.env` (0 turns a wait off).
 - `!tournament create [points]` opens a tournament and enters you automatically. Others join with `!tournament join`, and the creator starts it with `!tournament start [decrypt|math]` (decrypt is the default). `!tournament status` shows the scores and `!tournament cancel` ends it.
 
 ### Extra games (opt-in)
 
-These live in `games.js` too and need `ENABLE_EXTRA_GAMES=1`. Like the games above they follow the per-group games setting, and a group only runs one game at a time.
+These live in `games.js` too and need `ENABLE_EXTRA_GAMES=1`. Like the games above they follow the per-group games setting, and tic-tac-toe, chess, blackjack and hot potato only hold up the people playing them. Every other game holds up the whole group, and so do tournaments, and a group can't run two of the same game at once.
 
 - `!coin` flips a coin, `!roll [sides]` or `!roll <count>d<sides>` rolls dice, and `!rps <rock|paper|scissors>` plays against the bot (`r`, `p` and `s` work too).
 - `!ttt` opens a tic-tac-toe lobby. A second player joins with `!ttt join`, and then you take turns sending a square from 1 to 9. `!ttt cancel` ends it.
 - `!numguess [max]` picks a number (up to 100 by default) and everyone guesses by sending plain numbers, with the bot saying higher or lower. `!wordle` starts a shared 5 letter wordle with 6 guesses, and `!anagram` scrambles a word for the first person to unscramble. All three take `hint`, and anagram takes `skip`.
 - `!hotpotato` starts a hot potato with a random fuse of 20 to 40 seconds. Pass it on with `!pass @user` (plain `!pass` hands it back). Whoever's holding it when it blows up loses, and `!hotpotato cancel` ends it early.
-- `!blackjack` deals a round of blackjack against the bot to whoever started it, who then replies `hit` or `stand`. The dealer stands on 17. `!slots` spins three reels once and tells you how you did, and `!wordchain` has everyone take turns saying a word that starts with the last letter of the one before, with no repeats and no going twice in a row. It ends when the group goes quiet for a minute. Blackjack and wordchain both take `cancel`, and neither is saved across a restart.
+- `!blackjack` deals a round of blackjack against the bot to whoever started it, who then replies `hit` or `stand`. The dealer stands on 17. `!slots` spins three reels once and tells you how you did, and `!wordchain` has everyone take turns saying a word that starts with the last letter of the one before, with no repeats and no going twice in a row. It ends when the group goes quiet for a minute. Blackjack and wordchain both take `cancel`, and neither is saved across a restart. Blackjack and slots count as casino games, so they also need `!mod casinoenabled true` in that group (it's off by default, and `gamesenabled` still has to be on).
+- `!chess` opens a chess lobby and `!chess join` takes the other side, with colours picked at random. `!chess ai [easy|medium|hard] [white|black]` plays the bot instead, and in a DM `!chess` starts a game against the bot straight away. Moves are plain messages like `e4` or `Nf3`, and the board comes back as a picture after every move. `!chess board` sends it again, `!chess resign` gives up, `!chess draw` offers a draw (the bot accepts when it isn't ahead on material) and `!chess cancel` ends the game. A lobby nobody joins closes after 2 minutes, and a game nobody moves in after 10. Set `STOCKFISH_PATH` in `.env` to let Stockfish pick the bot's moves, otherwise a small built-in engine plays.
 
 Wordle and anagram pull their words from the same random word API as decrypt, and every word gets checked against a dictionary first. With the desktop AI on, hints reword that dictionary definition. Wordle, anagram and numguess are saved like the games above, so they survive a restart. The rest time out on their own, 3 minutes at the most.
 
@@ -99,11 +102,41 @@ The rest are for managing a group. Trusted users and group admins only, and the 
 
 - `!mute [duration]` and `!unmute` lock the group so only admins can talk. A duration like `2h`, `120min` or `1h30min` unmutes it again on its own (anything from 1 minute to 30 days).
 - `!ban [@user | number] [duration]` and `!unban` make the bot ignore someone in that group. You can mention them, reply to them, or give a phone number, and the duration works like it does for `!mute`. Trusted users can't be banned.
-- `!execute <@user | number>` kicks someone out of the group, and `!add <number>` adds someone (country code first, like `!add 6591234567`). `!execute` can't remove other admins.
+- `!execute <@user | number>` kicks someone out of the group, but it can not remove other admins. Trusted users can also add someone with `!special addmember <number>`, which works in the group you run it in (country code first, like `!special addmember 6591234567`).
 - `!automute <once|all> <HH:MM>` and `!autounmute` mute and unmute the group on a schedule, where `once` runs one time and `all` runs every day. `!automute off` cancels it, and running the command with nothing after it shows the schedule. Times follow `EXTRA_TIMEZONE` (Asia/Singapore by default), and the schedules are kept in `extras-state.json`, though one only fires if the bot is running at that exact minute.
-- `!warn <@user | number> [reason]` gives someone a warning (you can also reply to them), `!unwarn <@user | number>` takes the newest one off (add `all` to clear them all), and `!warnings` lists everyone with warnings, or `!warnings <@user | number>` shows one person. Trusted users and group admins can't be warned. What happens is set per group with `!mod`: `warntoggle` turns the commands on or off (on by default), `warnlimit` is how many warnings it takes (1 to 20, 3 by default), `warnaction` is `notify` (the default, the bot only says so), `kick`, or `ban [duration]` (a time like `2h`, or `0` or nothing for a ban with no end), which can be mixed freely (like `!mod warnaction kick ban 2h`), and `warnexpiry` makes warnings run out after that many days (0 means they never expire). Warnings are kept in `extras-state.json`.
+- `!warn <@user | number> [reason]` gives someone a warning (you can also reply to them, and put a number before the reason to give that many at once, like `!warn @user 2 spamming`), `!unwarn <@user | number>` takes the newest one off (add `all` to clear them all), and `!warnings` lists everyone with warnings, or `!warnings <@user | number>` shows one person with the reason for each warning. Trusted users and group admins can't be warned. What happens is set per group with `!mod`: `warntoggle` turns the commands on or off (on by default), `warnlimit` is how many warnings it takes (1 to 20, 3 by default), `warnaction` is `notify` (the default, the bot only says so), `kick`, or `ban [duration]` (a time like `2h`, or `0` or nothing for a ban with no end), which can be mixed freely (like `!mod warnaction kick ban 2h`), and `warnexpiry` makes warnings run out after that many days (0 means they never expire). Warnings are kept in `extras-state.json`.
 
 The bot can also warn people by itself when their messages keep getting deleted for cursing. `!mod warncurses <number>` is how many deleted messages it takes (0 turns it off), and `!mod warncursestime <minutes>` is how long the count lasts (1 to 60). The count is per person, starts at their first deleted message, and goes back to 0 when the time is up. Once it goes past the number they get a warning, and then another for each further deleted message in the same window. It works like `!warn`, so it counts toward `warnlimit` and trusted users and admins are skipped. It needs `ENABLE_EXTRA_COMMANDS=1` and the bot has to be a group admin, since it only counts messages it really deleted. The starting numbers for every group come from `WARN_CURSES_DEFAULT` and `WARN_CURSES_TIME_DEFAULT` in `.env` (5 and 5 if they aren't set), and the counts are forgotten when the bot restarts.
+
+`!mod warntrusted <true/false>` decides whether trusted users and group admins can be warned at all. It is on by default, and even then a warning never kicks or bans them. Setting it to false means warnings skip them entirely.
+
+`!mod menudeletetime <0 or 15-60>` makes the bot delete its own menu again after that many seconds, so long menus don't sit in the chat. 0 leaves the menu alone.
+
+`!mod enablehelpmenu <true|false>` turns the help menu on for a chat. It's off by default, and while it's off `!help` just does its old jokee. With it on, `!help` lists the categories and `!help <category>` lists the commands in one. The categories are ai, games, utils, moderation and trusted, and people only see the categories and commands they're allowed to use.
+
+## Welcome messages
+
+`!mod welcomeMsgEnabled true` greets people when they join, and `!mod welcomeMsg <text>` sets what it says. `[user]` in the text is replaced with a mention of the person who joined.
+
+When two or more people are added in one go the bot sends a single combined message with `[user]` replaced by "new members" instead of tagging each person, so adding a dozen people doesn't flood the group.
+
+## Bad word filter
+
+`!mod antibadword true` turns the filter on for a group. Every ordinary message is scored by a local moderation service and anything that comes back toxic is deleted, as long as the bot is an admin. Commands starting with `!` are skipped. `!mod antibadwordnosay true` does the same but never says anything in the chat, and `!mod antibadwordreport true` adds a line telling people to contact an admin if they think it was a mistake.
+
+`!mod badwordlog <silent|info|debug>` sets how much the bot says when it deletes something. `silent` just asks them to be nice, `info` adds the toxicity score, and `debug` lists every score the model returned.
+
+The service lives in `detoxify/` and runs on its own, so auto deploy does not restart it. `BADWORD_MODEL` picks the model: `detoxify` is the default and lighter, `textdetox` is better at Chinese and Japanese but wants more RAM, and `auto` loads both and picks per message: normal Latin text goes to the English detoxify model, which copes much better with slang, and anything in another script goes to textdetox. Short messages are held to a higher bar than long ones, because the multilingual models flag one or two words far too easily, and `BADWORD_SHORT_THRESHOLD` (0.98 by default) sets that bar.
+
+### Pictures (opt-in)
+
+With `BADWORD_VISION=1` set for both the moderation service and the bot, the two settings above also cover images, stickers, view-once media and the preview frame of videos and GIFs. Each picture is checked for explicit content, and any text inside it is read and scored like a normal message, so a rude meme is caught even with no caption. A flagged picture is deleted and counts towards a warning, exactly like a flagged message.
+
+`BADWORD_NSFW_THRESHOLD` (0.85 by default) sets how sure the model has to be before a picture counts as explicit. Verdicts are remembered per picture, so the same sticker sent twice doesn't bother the service twice, and if the service is down or busy the media is simply left alone.
+
+## Trusted only mode
+
+`!mod trustedonly true` makes the bot ignore everyone in that group except trusted users and group admins. It is off by default, it only applies in groups, and the group still has to be switched on for the bot to answer at all. Moderation (the badword check and the link blocker) keeps running for everyone, and `!mod trustedonly false` lets everybody back in.
 
 ## Direct messages
 
@@ -129,6 +162,7 @@ Numbers added from chat are saved in `extras-state.json`. Numbers from `.env` ca
 
 - Before each message the bot shows the typing indicator and waits a random 1 to 3 seconds. It sends at most 20 messages a minute and 300 an hour, and a message that waits more than 2 minutes for room gets dropped.
 - Each person has to wait 3 seconds between commands, or 10 between heavy ones, and anything sent too soon is ignored. `!plot`, `!pfp`, `!whoami` and `!animsticker` have their own longer cooldowns. Trusted users are exempt from the general cooldown. On top of that, `!pfp` lookups are capped at 30 an hour across everyone, and `!plot` takes at most 10 expressions and 500 characters, because a huge plot can freeze the bot.
+- `!slots` and `!blackjack` share one cooldown, and trusted users set it with `!antiban casinocooldown <seconds>`. It defaults to 5 seconds and accepts 0 to 60.
 - Messages older than 60 seconds are ignored, so a reconnect doesn't set off a flood of replies. The bot also waits longer after every failed reconnect, up to 5 minutes. If the connection closes mid-send it just carries on.
 
 Trusted users can change things on the fly, and the changes are kept in `antiban-state.json`:

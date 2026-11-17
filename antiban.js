@@ -32,7 +32,11 @@ function limits() {
         cooldownMs: numberSetting("ANTIBAN_COMMAND_COOLDOWN", 3) * 1000,
         heavyCooldownMs: numberSetting("ANTIBAN_HEAVY_COOLDOWN", 10) * 1000,
         maxAgeSeconds: numberSetting("ANTIBAN_MAX_MESSAGE_AGE", 60),
-        reconnectMaxMs: numberSetting("ANTIBAN_RECONNECT_MAX", 300) * 1000
+        reconnectMaxMs: numberSetting("ANTIBAN_RECONNECT_MAX", 300) * 1000,
+        // how long nothing goes out after WhatsApp answers 403, in minutes
+        forbiddenPauseMs: numberSetting("ANTIBAN_FORBIDDEN_PAUSE", 15) * 60 * 1000,
+        // and for a second 403 within the hour, in minutes
+        forbiddenRepeatPauseMs: numberSetting("ANTIBAN_FORBIDDEN_PAUSE_REPEAT", 45) * 60 * 1000
     };
 }
 
@@ -47,7 +51,15 @@ const HEAVY_COMMANDS = new Set([
 
 // Commands with their own cooldown (seconds), changed with
 // "!<command> setcooldown <seconds>". They replace the normal/heavy cooldown.
-const COMMAND_COOLDOWN_DEFAULTS = { "!plot": 20, "!pfp": 30, "!whoami": 10, "!animsticker": 30 };
+const COMMAND_COOLDOWN_DEFAULTS = { "!plot": 20, "!pfp": 30, "!whoami": 10, "!animsticker": 30, "!casino": 5 };
+
+// !slots and !blackjack share the one "!casino" cooldown, so doing a a game after one another dosent do anything, it just ignores the commandd
+// the casino cooldown is changed with !antiban casinocooldown <seconds> instead
+const CASINO_COMMANDS = new Set(["!slots", "!blackjack"]);
+
+function cooldownKey(name) {
+    return CASINO_COMMANDS.has(name) ? "!casino" : name;
+}
 
 // A connection up this long resets the reconnect backoff.
 const STABLE_CONNECTION_MS = 60 * 1000;
@@ -110,7 +122,7 @@ function loadState() {
 function saveState() {
     try {
         const temp = `${STATE_FILE}.tmp`;
-        fs.writeFileSync(temp, JSON.stringify(state, null, 4), "utf8");
+        fs.writeFileSync(temp, JSON.stringify({ ...state, health: healthEvents, pausedUntil }, null, 4), "utf8");
         fs.renameSync(temp, STATE_FILE);
     } catch (error) {
         log.error("antiban", "Failed to write antiban-state.json:", error);
@@ -215,11 +227,37 @@ const HEALTH_POINTS = { disconnect: 10, forbidden: 30, failed: 6 };
 const healthEvents = [];
 let lastRiskLevel = "low";
 
-function recordHealth(kind) {
+// until this time nothing goes out, happenss when WhatsApp answers 403
+let pausedUntil = 0;
+
+// puts back what saveState wrote before the last restart, so the score and the pause carry over
+function loadHealth() {
+    try {
+        const saved = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+        const now = clock.now();
+        if (saved && Array.isArray(saved.health)) {
+            for (const event of saved.health) {
+                if (event && Object.hasOwn(HEALTH_POINTS, event.kind) && Number.isFinite(event.time) && event.time > now - HEALTH_WINDOW_MS) {
+                    healthEvents.push({ kind: event.kind, time: event.time, code: event.code });
+                }
+            }
+        }
+        if (saved && Number.isFinite(saved.pausedUntil) && saved.pausedUntil > now) {
+            pausedUntil = saved.pausedUntil;
+        }
+    } catch {
+        // no file yet or it cant be read, loadState already complained about that (L)
+    }
+}
+loadHealth();
+
+function recordHealth(kind, code) {
     if (!plusEnabled()) {
         return;
     }
-    healthEvents.push({ kind, time: clock.now() });
+    healthEvents.push({ kind, time: clock.now(), code });
+    // saved to the state file so a restart does not wipe the score
+    saveState();
     // peeking at the level also logs it if it just changed
     riskLevel();
 }
@@ -248,6 +286,11 @@ function riskLevel() {
         level = "medium";
     }
 
+    // after a 403 nothing goes out until the pause is over
+    if (pausedUntil > clock.now()) {
+        level = "critical";
+    }
+
     if (level !== lastRiskLevel) {
         log.warn("antiban", `ban risk went from ${lastRiskLevel} to ${level} (score ${score}).`);
         lastRiskLevel = level;
@@ -270,11 +313,28 @@ function riskAllows(priority) {
 }
 
 // index.js yells this whenever the connection drops
-function connectionClosed(statusCode) {
-    recordHealth("disconnect");
-    if (statusCode === 403) {
-        recordHealth("forbidden");
+function connectionClosed(statusCode, reason) {
+    recordHealth("disconnect", statusCode);
+    if (plusEnabled()) {
+        log.warn("antiban", "connection closed with code " + (statusCode || "unknown") + (reason ? " (" + reason + ")" : "") + ".");
     }
+    if (statusCode === 403) {
+        recordHealth("forbidden", statusCode);
+        forbiddenResponse();
+    }
+}
+
+// 403 means WhatsApp is refusing us. the first one pauses sending for a while, and a second one
+// within the hour pauses it for longer
+function forbiddenResponse() {
+    if (!plusEnabled()) {
+        return;
+    }
+    const recent = healthEvents.filter((event) => event.kind === "forbidden").length;
+    const pauseMs = recent >= 2 ? limits().forbiddenRepeatPauseMs : limits().forbiddenPauseMs;
+    pausedUntil = clock.now() + pauseMs;
+    saveState();
+    log.error("antiban", "got 403 from WhatsApp, nothing goes out for " + Math.round(pauseMs / 60000) + " minutes.");
 }
 
 // --- content variator ---
@@ -617,7 +677,8 @@ function reconnectDelay() {
     const { reconnectMaxMs } = limits();
     const base = Math.min(reconnectMaxMs, 5000 * 3 ** (reconnectAttempts - 1));
     const jitter = 0.8 + Math.random() * 0.4;
-    return Math.round(Math.min(reconnectMaxMs, base * jitter));
+    const wait = Math.round(Math.min(reconnectMaxMs, base * jitter));
+    return Math.max(wait, pausedUntil - clock.now());
 }
 
 function connectionOpened() {
@@ -692,7 +753,12 @@ function shouldIgnoreCommand({ text, trusted, senderJid }) {
     }
 
     // Changing a cooldown is not a use of the command.
-    if (Object.hasOwn(COMMAND_COOLDOWN_DEFAULTS, name) && (words[1] || "").toLowerCase() === "setcooldown") {
+    if (Object.hasOwn(COMMAND_COOLDOWN_DEFAULTS, cooldownKey(name)) && (words[1] || "").toLowerCase() === "setcooldown" && cooldownKey(name) !== "!casino") {
+        return false;
+    }
+
+    // Cancelling a blackjack game is not a new round, so let it through.
+    if (CASINO_COMMANDS.has(name) && (words[1] || "").toLowerCase() === "cancel") {
         return false;
     }
 
@@ -701,9 +767,9 @@ function shouldIgnoreCommand({ text, trusted, senderJid }) {
     if (state.cooldownOn) {
         let kind = "normal";
         let gap;
-        if (Object.hasOwn(COMMAND_COOLDOWN_DEFAULTS, name)) {
-            kind = name;
-            gap = commandCooldownSeconds(name) * 1000;
+        if (Object.hasOwn(COMMAND_COOLDOWN_DEFAULTS, cooldownKey(name))) {
+            kind = cooldownKey(name);
+            gap = commandCooldownSeconds(kind) * 1000;
         } else if (HEAVY_COMMANDS.has(name)) {
             kind = "heavy";
             gap = currentCooldown().heavyCooldownMs;
@@ -842,12 +908,23 @@ async function handleBot(sock, msg, { text, trusted, commandPrefix }) {
     }
 
     const wantOff = action === "off";
+    // bot on also lifts a pause from a 403
+    if (!wantOff && !state.off && pausedUntil > clock.now()) {
+        pausedUntil = 0;
+        saveState();
+        await sayNow(sock, msg, "The 403 pause is lifted and the bot is on.");
+        return;
+    }
+
     if (state.off === wantOff) {
         await sayNow(sock, msg, `The bot is already ${action}.`);
         return;
     }
 
     state.off = wantOff;
+    if (!wantOff) {
+        pausedUntil = 0;
+    }
     saveState();
     await sayNow(
         sock,
@@ -928,7 +1005,7 @@ async function handleStatus(sock, msg, { text, trusted, commandPrefix }) {
         return;
     }
 
-    // just the ban risk line, nothing else phew
+    // just the ban risk line, nothing else
     if (action === "banrisk") {
         if (!plusEnabled()) {
             await sayNow(sock, msg, "Ban risk tracking is turned off. Set ENABLE_ANTIBAN_PLUS=1 to use it.");
@@ -958,8 +1035,25 @@ async function handleStatus(sock, msg, { text, trusted, commandPrefix }) {
         return;
     }
 
+    // the one cooldown !slots and !blackjack share, 0 to 60 seconds
+    if (action === "casinocooldown") {
+        if (value === undefined) {
+            await sayNow(sock, msg, `The casino cooldown is ${commandCooldownSeconds("!casino")} seconds.\nUsage: ${commandPrefix}antiban casinocooldown <seconds> (from 0 to 60)`);
+            return;
+        }
+        const seconds = Number(value);
+        if (!Number.isFinite(seconds) || seconds < 0 || seconds > 60) {
+            await sayNow(sock, msg, `Usage: ${commandPrefix}antiban casinocooldown <seconds> (from 0 to 60)`);
+            return;
+        }
+        state.commandCooldowns["!casino"] = seconds;
+        saveState();
+        await sayNow(sock, msg, `The casino cooldown has been set to ${seconds} seconds.`);
+        return;
+    }
+
     if (action) {
-        await sayNow(sock, msg, `Usage: ${commandPrefix}antiban [banrisk | perminute <number> | perhour <number> | reset]`);
+        await sayNow(sock, msg, `Usage: ${commandPrefix}antiban [banrisk | perminute <number> | perhour <number> | reset | casinocooldown <seconds>]`);
         return;
     }
 
@@ -990,8 +1084,13 @@ async function handleCommandCooldown(sock, msg, { text, trusted, commandPrefix }
         return false;
     }
 
-    const command = name.toLowerCase();
-    const shown = `${commandPrefix}${command.slice(1)}`;
+    const typed = name.toLowerCase();
+    const command = cooldownKey(typed);
+    // the casino cooldown is set with !antiban casinocooldown now
+    if (command === "!casino") {
+        return false;
+    }
+    const shown = `${commandPrefix}${typed.slice(1)}`;
 
     if (value === undefined) {
         await reply(sock, msg, `The ${shown} cooldown is ${commandCooldownSeconds(command)} seconds.\nUsage: ${shown} setcooldown <seconds>`);
@@ -1003,9 +1102,10 @@ async function handleCommandCooldown(sock, msg, { text, trusted, commandPrefix }
         return true;
     }
 
+    const maxSeconds = MAX_COOLDOWN_SECONDS;
     const seconds = Number(value);
-    if (!Number.isFinite(seconds) || seconds < 0 || seconds > MAX_COOLDOWN_SECONDS) {
-        await reply(sock, msg, `Usage: ${shown} setcooldown <seconds> (from 0 to ${MAX_COOLDOWN_SECONDS})`);
+    if (!Number.isFinite(seconds) || seconds < 0 || seconds > maxSeconds) {
+        await reply(sock, msg, `Usage: ${shown} setcooldown <seconds> (from 0 to ${maxSeconds})`);
         return true;
     }
 
@@ -1039,7 +1139,7 @@ async function handleCommand(sock, msg, ctx) {
     }
 
     const name = ctx.text.trim().split(/\s+/)[0].toLowerCase();
-    if (Object.hasOwn(COMMAND_COOLDOWN_DEFAULTS, name)) {
+    if (Object.hasOwn(COMMAND_COOLDOWN_DEFAULTS, cooldownKey(name))) {
         return handleCommandCooldown(sock, msg, ctx);
     }
     if (!Object.hasOwn(COMMANDS, name)) {
@@ -1073,6 +1173,7 @@ module.exports = {
             lastCommandAt.clear();
             pfpTimes.length = 0;
             healthEvents.length = 0;
+            pausedUntil = 0;
             lastRiskLevel = "low";
             recentTexts.clear();
             warnedPfpLimit = false;

@@ -8,6 +8,12 @@ let started = false;
 let busy = false;
 // the commit we already failed to pull, so a broken pull doesnt spam the log every check
 let failedAt = null;
+let waitingFor = null;
+
+// minutes the newest commit has to sit before we update.
+const QUIET_MINUTES = process.env.AUTO_DEPLOY_QUIET_MINUTES === undefined ? 3 : Math.max(0, Number(process.env.AUTO_DEPLOY_QUIET_MINUTES) || 0);
+// the same thing in ms, check() compares against this one
+const quietMs = QUIET_MINUTES * 60 * 1000;
 
 function git(...args) {
     return run("git", args, 60 * 1000);
@@ -56,6 +62,18 @@ async function check(beforeRestart) {
         const latest = await git("rev-parse", "@{u}");
         if (latest === failedAt) {
             return;
+        }
+
+        // hold off until the newest commit has been sitting a few minutes
+        if (quietMs > 0) {
+            const committedAt = Number(await git("log", "-1", "--format=%ct", "@{u}")) * 1000;
+            if (Date.now() - committedAt < quietMs) {
+                if (waitingFor !== latest) {
+                    waitingFor = latest;
+                    log.info("deploy", "new commit found, waiting " + QUIET_MINUTES + " quiet minutes before updating");
+                }
+                return;
+            }
         }
 
         const before = await git("rev-parse", "HEAD");

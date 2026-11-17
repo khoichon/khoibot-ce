@@ -1,6 +1,6 @@
 // simple baileys bot!!!
 
-// libsignal dumps a whole session (keys and all spamming the logs which i hate) every time it swaps one, which floods the logs
+// libsignal dumps a whole session (keys and all) every time it swaps one, which floods the logs
 // so we quietly drop those few lines and let everything else through
 const noisySessionLines = ["Closing session:", "Opening session:", "Removing old closed session:", "Migrating session to:"];
 const originalConsoleInfo = console.info.bind(console);
@@ -19,7 +19,7 @@ const {
 
 const qrcode = require("qrcode-terminal");
 
-const { getText, reply } = require("./utils.js");
+const { getText, reply, replyTemporary } = require("./utils.js");
 
 const aitools = require("./aitools.js");
 const chatlog = require("./chatlog.js");
@@ -45,10 +45,12 @@ const games = require("./games.js");
 const autoDeploy = require("./autodeploy.js");
 const extras = require("./extras.js");
 const antiban = require("./antiban.js");
+const help = require("./help.js");
 const logging = require("./logging.js");
 const { log } = logging;
 
 const { isToxic } = require("./moderation.js");
+const mediamod = require("./mediamod.js");
 const linkblock = require("./linkblock.js");
 
 const { getWeather } = require("./get_weather.js");
@@ -56,6 +58,8 @@ const { getWeather } = require("./get_weather.js");
 const { 
     getCatPhoto,
     getDogPhoto,
+    getMeme,
+    getMemeVideo,
     calculateEquation,
     sleep
 } = require("./random-apis.js");
@@ -66,18 +70,55 @@ const {
     evaluate
 } = require("./mathplots.js")
 
+const {
+    getMessage
+} = require("./messages.js")
+const { drunkify } = require("./drunk.js");
+
 const devMode = process.argv.includes("--dev");
 const commandPrefix = devMode ? "t!" : "!";
+
+// the antibadword only skips real commands. if it skipped everything that starts with ! anyone could put a ! in front of a bad word
+const KNOWN_COMMANDS = new Set([
+    "ai", "anagram", "animsticker", "antiban", "automute", "autounmute", "ban", "blackjack", "bot", "cat", "chess", "coin", "compliment", "connect4", "credits", "crossword", "decrypt", "define", "docs", "dog", "down", "drunkify", "edit", "execute", "fact", "help", "hotpotato", "joke", "math", "meme", "menu", "messagecooldown", "messagedelay", "minesweeper", "mod", "mute", "numguess", "pass", "pfp", "plane", "plot", "quote", "roast", "roll", "rps", "scp", "slots", "special", "sticker", "summarise", "tag", "tournament", "translate", "tts", "ttt", "unban", "unmute", "unwarn", "up", "warn", "warnings", "weather", "whoami", "wiki", "wordchain", "wordle"
+]);
+
+const WORDLE_SUBCOMMANDS = new Set(["", "cancel", "hint"]);
+
+function isKnownCommand(text) {
+    const [first, ...rest] = text.split(" ");
+    const word = first.toLowerCase();
+    if (!word.startsWith("!") || !KNOWN_COMMANDS.has(word.slice(1))) {
+        return false;
+    }
+
+    if (word === "!wordle") {
+        return WORDLE_SUBCOMMANDS.has(rest.join(" ").trim().toLowerCase());
+    }
+
+    return true;
+}
 
 function lowerCommandWord(text) {
     return text.startsWith("!") ? text.replace(/^\S+/, word => word.toLowerCase()) : text;
 }
+
 const path = require("node:path");
 // ============================================================
 // Welcome message
 // ============================================================
 
 async function sendWelcomeMessage(sock, groupId, participants, welcomeMsg) {
+    // When a bunch of people get added in one go, one message for all of them
+    if (participants.length >= 2) {
+        await sock.sendMessage(
+            groupId,
+            { text: welcomeMsg.replace("[user]", "new members") },
+            { priority: "low" }
+        );
+        return;
+    }
+
     for (const entry of participants) {
         // Baileys 7 sends objects ({ id, phoneNumber, ... }); !special welcome sends a string
         const participant = typeof entry === "string" ? entry : entry?.id;
@@ -311,7 +352,8 @@ const startSock = async () => {
 
 
                 // the health monitor wants to know about every drop
-                antiban.connectionClosed(statusCode);
+                const closeReason = Object.keys(DisconnectReason).find((name) => DisconnectReason[name] === statusCode);
+                antiban.connectionClosed(statusCode, closeReason);
 
                 const shouldReconnect =
                     statusCode !==
@@ -710,7 +752,67 @@ const startSock = async () => {
                         (extras.extraCommandsEnabled() ? extras.captionText(msg.message) : null);
 
 
-                    if (!receivedText) {
+                    // pictures, stickers and videos mostly have no text, so the text check below would skip them.
+            // they get their own check here and follow the same antibadword and antibadwordnosay settings
+            const mediaChatId = msg.key.remoteJid;
+            if (
+                mediaChatId.endsWith("@g.us") &&
+                mediamod.enabled() &&
+                (getGroupSetting(mediaChatId, "antibadword") ||
+                    getGroupSetting(mediaChatId, "antibadwordnosay")) &&
+                isGroupEnabled(mediaChatId)
+            ) {
+                let verdict = null;
+                try {
+                    verdict = await mediamod.checkMessage(sock, msg, 0.9);
+                } catch (error) {
+                    // fail open, if the picture api is down the bot should keep working
+                    log.error("mod", "Picture moderation error:", error);
+                }
+
+                if (verdict && verdict.bad) {
+                    log.info("mod",
+                        "Detected bad " + verdict.kind + " (" + verdict.reason + ", " + verdict.score + ")"
+                    );
+
+                    const botIsAdmin = await isBotAdmin(mediaChatId);
+
+                    // nosay deletes quietly, everything else says why
+                    if (!getGroupSetting(mediaChatId, "antibadwordnosay")) {
+                        const mode = getGroupSetting(mediaChatId, "badwordlog");
+                        let note = (botIsAdmin ? "This " + verdict.kind + " was deleted. " : "") + "Please be nice.";
+                        if (getGroupSetting(mediaChatId, "antibadwordreport")) {
+                            note += " (If you think it was a mistake please contact the group admin.)";
+                        }
+                        if (mode !== "silent") {
+                            const why = verdict.reason === "explicit" ? "explicit picture" : "toxic text in the picture";
+                            note += "\nReason: " + why + "\nScore: " + verdict.score;
+                        }
+                        await reply(sock, msg, note);
+                    }
+
+                    if (botIsAdmin) {
+                        await sock.sendMessage(mediaChatId, {
+                            delete: msg.key
+                        });
+
+                        // same as the text check, a deleted picture counts toward a warning
+                        if (extras.extraCommandsEnabled()) {
+                            try {
+                                await extras.curseDeleted(sock, msg, {
+                                    chatId: mediaChatId,
+                                    senderJid: msg.key.participant || msg.key.participantAlt || mediaChatId
+                                });
+                            } catch (error) {
+                                log.error("mod", "Could not give the curse warning:", error);
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            if (!receivedText) {
                         continue;
                     }
 
@@ -828,6 +930,7 @@ const startSock = async () => {
 
                     if (
                         isGroup &&
+                        !isKnownCommand(text) &&
                         (getGroupSetting(chatId, "antibadword") ||
                             getGroupSetting(chatId, "antibadwordnosay"))
                     ) {
@@ -1023,6 +1126,11 @@ Toxicity score: ${result.score}`
                         continue;
                     }
 
+                    // trustedonly: the bot only listens to trusted people and group admins, everyone else gets the silent treatment (L)
+                    if (isGroup && getGroupSetting(chatId, "trustedonly") && !trusted && !groupAdmin) {
+                        continue;
+                    }
+
                     // keeps the latest messages of each group so !summarise <number> has something to read.
                     // commands are left out since nobody wants those in a summary
                     if (isGroup && !text.startsWith("!")) {
@@ -1126,9 +1234,13 @@ Toxicity score: ${result.score}`
                     // !ai
                     // ----------------------------------------------------
                     if (text === "!ai" || text.startsWith("!ai ")) {
+                        // this chat turned the ai off with !mod toggleai
+                        if (!getGroupSetting(chatId, "toggleai")) {
+                            await reply(sock, msg, "The AI commands are switched off in this chat.");
+                            continue;
+                        }
+
                         try {
-                            // chat answers already took ages to make, so no extra reply delay on top of that.
-                            // personality and the other settings replies still wait like normal.
                             const firstWord = text.slice("!ai".length).trim().split(/\s+/)[0].toLowerCase();
                             // pictures have their own handler since the answer is an image, not text
                             if (firstWord === "imagine") {
@@ -1139,7 +1251,16 @@ Toxicity score: ${result.score}`
                                 });
                                 continue;
                             }
-                            const isChat = firstWord && firstWord !== "personality" && firstWord !== "reset";
+                            // describing a picture needs the whole message to find the picture, so like imagine it answers by itself
+                            if (firstWord === "describeimage") {
+                                await aitools.handleDescribeImage(sock, msg, {
+                                    chatId,
+                                    argument: text.slice("!ai".length).trim().slice("describeimage".length)
+                                });
+                                continue;
+                            }
+                            const ownPicture = (await mediamod.getPicture(sock, msg, true))?.buffer;
+                            const isChat = (firstWord || ownPicture) && firstWord !== "personality" && firstWord !== "reset";
                             // show "typing..." while the model thinks. whatsapp drops it after a few seconds
                             // so we keep poking it until the answer is ready.
                             const sendPresence = (state) => Promise.resolve().then(() => sock.sendPresenceUpdate(state, msg.key.remoteJid)).catch(() => {});
@@ -1150,18 +1271,25 @@ Toxicity score: ${result.score}`
                             }
                             let answer;
                             try {
-                                answer = await aitools.handleAi(chatId, text.slice("!ai".length));
+                                // tell the ai who is asking and, in groups, what the others just said
+                                const aiContext = isChat ? {
+                                    name: msg.pushName || "Someone",
+                                    recentText: isGroup ? chatlog.recent(chatId, 10).text : ""
+                                } : undefined;
+                                answer = await aitools.handleAi(chatId, text.slice("!ai".length), aiContext, ownPicture);
                             } finally {
                                 if (typingTimer) {
                                     clearInterval(typingTimer);
                                     sendPresence("paused");
                                 }
                             }
-                            if (isChat && sock.sendMessageImmediate) {
-                                await sock.sendMessageImmediate(msg.key.remoteJid, { text: answer }, { quoted: msg });
-                            } else {
-                                await reply(sock, msg, answer);
+                            // in groups the answer starts with a ping/mention so the person who asked actually sees it
+                            let aiContent = { text: answer };
+                            const askerJid = msg.key.participant;
+                            if (isChat && isGroup && askerJid) {
+                                aiContent = { text: `@${askerJid.split("@")[0].split(":")[0]} ${answer}`, mentions: [askerJid] };
                             }
+                            await sock.sendMessage(msg.key.remoteJid, aiContent, { quoted: msg });
                         } catch (error) {
                             log.error("ai", "Error in !ai:", error);
                             await reply(sock, msg, "Something went wrong with the AI. Please try again later.");
@@ -1174,14 +1302,22 @@ Toxicity score: ${result.score}`
                     // ----------------------------------------------------
 
                     else if (
-                        text === "!help"
+                        text === "!help" ||
+                        text === "!menu" ||
+                        text.startsWith("!help ") ||
+                        text.startsWith("!menu ")
                     ) {
-                        // only legacy khoibot users know the joke
-                        await reply(
-                            sock,
-                            msg,
-                            "What if I just... don't?"
-                        );
+                        // with the menu turned on (!mod enablehelpmenu) show it, otherwise !help keeps doing the old tetx
+                        if (getGroupSetting(chatId, "enablehelpmenu")) {
+                            await reply(sock, msg, help.buildHelp(text.split(/\s+/)[1], { trusted, groupAdmin }, commandPrefix));
+                        } else if (text === "!help") {
+                            // only legacy khoibot users know the joke
+                            await reply(
+                                sock,
+                                msg,
+                                "What if I just... don't?"
+                            );
+                        }
                     }
 
                     // ----------------------------------------------------
@@ -1243,6 +1379,46 @@ Toxicity score: ${result.score}`
                             msg,
                             "wow this guy is so tuff am i right"
                         );
+                    }
+
+                    if (text === "!credits") {
+
+                        await reply(
+                            sock,
+                            msg,
+                            "Minesweeper and Connect 4 credit goes to ASHBot."
+                        );
+                    }
+
+                    if (text === "!up") {
+
+                        await reply(
+                            sock,
+                            msg,
+                            "Bot is up and running!"
+                        );
+                    }
+
+                    if (text === "!down") {
+
+                        await reply(
+                            sock,
+                            msg,
+                            "Bot is down and walking."
+                        );
+                    }
+
+                    if (text === "!drunkify" || text.startsWith("!drunkify ")) {
+                        const input = text.slice(9).trim();
+                        if (!input) {
+                            await reply(sock, msg, "Usage: !drunkify <text>");
+                            continue;
+                        }
+                        if (input.length > 1000) {
+                            await reply(sock, msg, "That text is too long (1000 characters maximum).");
+                            continue;
+                        }
+                        await sock.sendMessage(chatId, { text: drunkify(input) }, { quoted: msg });
                     }
 
                     if (text === "!cat") {
@@ -1393,6 +1569,65 @@ Toxicity score: ${result.score}`
 
 
                     // ----------------------------------------------------
+                    // !meme
+                    // ----------------------------------------------------
+
+                    else if (
+                        text === "!meme"
+                    ) {
+
+                        try {
+                            let meme = await getMeme();
+                            let video = null;
+
+                            if (meme.isGif) {
+                                try {
+                                    video = await getMemeVideo(meme.url);
+                                } catch (error) {
+                                    log.error("meme", "Could not turn the gif into a video:", error);
+                                    meme = await getMeme({ imagesOnly: true });
+                                }
+                            }
+
+                            const content = video
+                                ? { video: video, gifPlayback: true, caption: meme.title }
+                                : { image: { url: meme.url }, caption: meme.title };
+
+                            await sock.sendMessage(
+                                chatId,
+                                content,
+                                {
+                                    quoted: msg
+                                }
+                            );
+                            log.info("meme", "Sent a meme from r/" + meme.subreddit);
+                        } catch (error) {
+                            log.error("meme", "Error fetching meme:", error);
+                            await reply(
+                                sock,
+                                msg,
+                                "Something went wrong while fetching a meme. Please try again later."
+                            );
+                        }
+                    }
+
+                    // ----------------------------------------------------
+                    // !docs (qol feature)
+                    // ----------------------------------------------------
+
+                    else if (
+                        text === "!docs"
+                    ) {
+
+                        // just sends the link to the docs site
+                        await reply(
+                            sock,
+                            msg,
+                            "Here are the khoibot docs: https://khoichon.dev/khoibot-docs/"
+                        );
+                    }
+
+                    // ----------------------------------------------------
                     // !whoami
                     // ----------------------------------------------------
 
@@ -1427,26 +1662,20 @@ Toxicity score: ${result.score}`
                         text.startsWith("!calc ")
                     ) {
                         log.info("calc", "Calculating expression:", text.slice(6).trim());
-                        let expression = text.slice(6).trim();
-                        // It will return a tuple of [result, error], where result is the calculated value or null if there was an error, and error is the error message or null if there was no error.
-                        const [result, error] = calculateEquation(expression);
-                        log.info("calc", "[CALC] After calculateEquation");
-                        log.info("calc", "[CALC] result =", result);
-                        log.info("calc", "[CALC] error =", error);
-                        
-                        if (error) {
-                            await reply(
-                                sock,
-                                msg,
-                                `Error: ${error}`
-                            );
-                        } else {
-                            await reply(
-                                sock,
-                                msg,
-                                `Result: ${result}`
-                            );
+                        const expressions = text.slice(6).split("\n").map((line) => line.trim()).filter(Boolean);
+                        if (!expressions.length) {
+                            expressions.push("");
                         }
+                        const outputs = expressions.map((expression) => {
+                            // It will return a tuple of [result, error], where result is the calculated value or null if there was an error, and error is the error message or null if there was no error.
+                            const [result, error] = calculateEquation(expression);
+                            log.info("calc", "[CALC] result =", result, "error =", error);
+                            if (expressions.length === 1) {
+                                return error ? `Error: ${error}` : `Result: ${result}`;
+                            }
+                            return `${expression} = ${error ? "Error: " + error : result}`;
+                        });
+                        await reply(sock, msg, outputs.join("\n"));
                     }
 
                     // ----------------------------------------------------
@@ -1808,9 +2037,6 @@ Toxicity score: ${result.score}`
                         );
                     }
 
-
-                   
-
                     // ----------------------------------------------------
                     // !pfp [@user | phone number]
                     // Sends the profile picture of the user
@@ -1861,10 +2087,21 @@ Toxicity score: ${result.score}`
                         log.info("pfp", '!pfp target:', targetJid);
 
                         try {
-                            const pfpUrl = await sock.profilePictureUrl(
-                                targetJid,
-                                'image'
-                            );
+                            let pfpUrl;
+                            for (const quality of ["image", "preview"]) {
+                                try {
+                                    pfpUrl = await sock.profilePictureUrl(targetJid, quality);
+                                } catch (err) {
+                                    log.info("pfp", "!pfp " + quality + " failed:", err.message);
+                                }
+                                if (pfpUrl) {
+                                    break;
+                                }
+                            }
+
+                            if (!pfpUrl) {
+                                throw new Error("no profile picture available");
+                            }
 
                             await sock.sendMessage(
                                 msg.key.remoteJid,
@@ -1981,7 +2218,7 @@ Toxicity score: ${result.score}`
                             const welcome = String(getGroupSetting(chatId, "welcomeMsg")).replace(/\s+/g, " ").trim();
                             const shortWelcome = welcome.length > 30 ? `${welcome.slice(0, 30).trimEnd()}...` : welcome;
 
-                            await reply(
+                            await replyTemporary(
                                 sock,
                                 msg,
                                 [
@@ -1999,6 +2236,14 @@ Toxicity score: ${result.score}`
                                     "",
                                     "Games",
                                     `  gamesenabled: ${getGroupSetting(chatId, "gamesenabled")}  (true|false)`,
+                                    `  casinoenabled: ${getGroupSetting(chatId, "casinoenabled")}  (true|false)`,
+                                    "",
+                                    "AI",
+                                    `  toggleai: ${getGroupSetting(chatId, "toggleai")}  (true|false)`,
+                                    `  drunkmode: ${getGroupSetting(chatId, "drunkmode")}  (true|false)`,
+                                    "",
+                                    "Access",
+                                    `  trustedonly: ${getGroupSetting(chatId, "trustedonly")}  (true|false)`,
                                     "",
                                     "Links",
                                     `  disablelinking: ${getGroupSetting(chatId, "disablelinking")}  (true|false)`,
@@ -2009,16 +2254,22 @@ Toxicity score: ${result.score}`
                                     "",
                                     "Warnings",
                                     `  warntoggle: ${getGroupSetting(chatId, "warntoggle")}  (true|false)`,
+                                    `  warntrusted: ${getGroupSetting(chatId, "warntrusted")}  (true|false)`,
                                     `  warnlimit: ${getGroupSetting(chatId, "warnlimit")}  (1-20)`,
                                     `  warnaction: ${getGroupSetting(chatId, "warnaction").join(" ")}  (kick, ban [duration] and notify, in any mix)`,
                                     `  warnexpiry: ${getGroupSetting(chatId, "warnexpiry")}  (days, 0 for never)`,
                                     `  warncurses: ${extras.curseSettings(chatId).limit}  (0-50, 0 for off)`,
                                     `  warncursestime: ${extras.curseSettings(chatId).minutes}  (minutes, 1-60)`,
                                     "",
+                                    "Menu",
+                                    `  menudeletetime: ${getGroupSetting(chatId, "menudeletetime")}  (0 or 15-60 seconds, 0 keeps the menu)`,
+                                    ...(Math.random() < 0.3 ? [`  enablehelpmenu: ${getGroupSetting(chatId, "enablehelpmenu")}  (true|false)`] : []),
+                                    "",
                                     "To update: !mod <key> <value>",
                                     "Extra: !mod test checks whether the bot is a group admin.",
                                     "Trusted only: !mod dmtoggle <number> turns commands on or off for one DM."
-                                ].join("\n")
+                                ].join("\n"),
+                                getGroupSetting(chatId, "menudeletetime")
                             );
 
                             continue;
@@ -2237,6 +2488,103 @@ Toxicity score: ${result.score}`
                             continue;
                         }
 
+                        // !mod casinoenabled <true|false> - blackjack and slots, off by default and separate from gamesenabled
+                        if (args[1]?.toLowerCase() === "casinoenabled") {
+                            if (args.length === 2) {
+                                await reply(sock, msg, `casinoenabled is currently ${getGroupSetting(chatId, "casinoenabled")}`);
+                                continue;
+                            }
+                            const value = args[2].toLowerCase();
+                            if (!["true", "false"].includes(value)) {
+                                await reply(sock, msg, "Usage: !mod casinoenabled <true|false>");
+                                continue;
+                            }
+                            setGroupSetting(chatId, "casinoenabled", value === "true");
+                            await reply(
+                                sock,
+                                msg,
+                                value === "true"
+                                    ? "casinoenabled set to true. Casino games work here as long as gamesenabled is also on."
+                                    : "casinoenabled set to false. Casino games are switched off in this chat."
+                            );
+                            continue;
+                        }
+
+                        // !mod enablehelpmenu <true|false> turns the help menu on for this chat, off by default
+                        if (args[1]?.toLowerCase() === "enablehelpmenu") {
+                            if (args.length === 2) {
+                                await reply(sock, msg, `enablehelpmenu is currently ${getGroupSetting(chatId, "enablehelpmenu")}`);
+                                continue;
+                            }
+                            const value = args[2].toLowerCase();
+                            if (!["true", "false"].includes(value)) {
+                                await reply(sock, msg, "Usage: !mod enablehelpmenu <true|false>");
+                                continue;
+                            }
+                            if (value === "true" && Math.random() >= 0.2) {
+                                await reply(sock, msg, getMessage("refusemodhelp"));
+                                continue;
+                            }
+                            setGroupSetting(chatId, "enablehelpmenu", value === "true");
+                            await reply(sock, msg, `enablehelpmenu set to ${value}`);
+                            continue;
+                        }
+
+                        // !mod forceenablehelpmenu skips the random chance and just turns the help menu on for this chat.
+                        // its left out of the lists on purpose
+                        if (args[1]?.toLowerCase() === "forceenablehelpmenu") {
+                            setGroupSetting(chatId, "enablehelpmenu", true);
+                            await replyTemporary(sock, msg, "enablehelpmenu set to true", 5);
+                            setTimeout(() => {
+                                sock.sendMessage(chatId, { delete: msg.key }).catch(() => {});
+                            }, 5000);
+                            continue;
+                        }
+
+                        // !mod warntrusted <true|false>  trusted people and group admins can be warned, on by default
+                        if (args[1]?.toLowerCase() === "warntrusted") {
+                            if (args.length === 2) {
+                                await reply(sock, msg, `warntrusted is currently ${getGroupSetting(chatId, "warntrusted")}. Use !mod warntrusted <true|false>.`);
+                                continue;
+                            }
+                            const value = args[2].toLowerCase();
+                            if (!["true", "false"].includes(value)) {
+                                await reply(sock, msg, "Usage: !mod warntrusted <true|false>");
+                                continue;
+                            }
+                            setGroupSetting(chatId, "warntrusted", value === "true");
+                            await reply(
+                                sock,
+                                msg,
+                                value === "true"
+                                    ? "warntrusted set to true. Trusted users and group admins can be warned, but they are never kicked or banned for it."
+                                    : "warntrusted set to false. Trusted users and group admins can't be warned."
+                            );
+                            continue;
+                        }
+
+                        // !mod trustedonly <true|false>  only trusted people and group admins can use the bot in this chat
+                        if (args[1]?.toLowerCase() === "trustedonly") {
+                            if (args.length === 2) {
+                                await reply(sock, msg, `trustedonly is currently ${getGroupSetting(chatId, "trustedonly")}`);
+                                continue;
+                            }
+                            const value = args[2].toLowerCase();
+                            if (!["true", "false"].includes(value)) {
+                                await reply(sock, msg, "Usage: !mod trustedonly <true|false>");
+                                continue;
+                            }
+                            setGroupSetting(chatId, "trustedonly", value === "true");
+                            await reply(
+                                sock,
+                                msg,
+                                value === "true"
+                                    ? "trustedonly set to true. Only trusted users and group admins can use the bot in this chat."
+                                    : "trustedonly set to false. Everyone can use the bot in this chat again."
+                            );
+                            continue;
+                        }
+
                         // the link rules in plain words, sent after link blocking gets turned on
                         const describeLinkRules = async () => {
                             const blocklist = getGroupSetting(chatId, "linkblocklist") || [];
@@ -2392,6 +2740,35 @@ Toxicity score: ${result.score}`
                                 value === "true"
                                     ? "warntoggle set to true. The warn commands are turned on."
                                     : "warntoggle set to false. The warn commands are turned off."
+                            );
+                            continue;
+                        }
+
+                        // ----------------------------
+                        // !mod menudeletetime <0|15-60>
+                        // how many seconds the !mod menu and the unknown setting list stay up before the bot deletes them, 0 keeps them
+                        // ----------------------------
+
+                        if (setting.toLowerCase() === "menudeletetime") {
+                            // show the current value
+                            if (args.length === 2) {
+                                await reply(sock, msg, `menudeletetime is currently ${getGroupSetting(chatId, "menudeletetime")}. Use !mod menudeletetime <0|15-60>, 0 keeps the menu.`);
+                                continue;
+                            }
+
+                            const value = Number(args[2]);
+                            if (!Number.isInteger(value) || (value !== 0 && (value < 15 || value > 60))) {
+                                await reply(sock, msg, "Usage: !mod menudeletetime <0|15-60>");
+                                continue;
+                            }
+
+                            setGroupSetting(chatId, "menudeletetime", value);
+                            await reply(
+                                sock,
+                                msg,
+                                value === 0
+                                    ? "menudeletetime set to 0. The !mod menu stays in the chat now."
+                                    : `menudeletetime set to ${value}. The !mod menu and the setting list delete themselves after ${value} seconds.`
                             );
                             continue;
                         }
@@ -2594,6 +2971,56 @@ Toxicity score: ${result.score}`
                             continue;
                         }
 
+                        // !mod toggleai [true|false] switches the ai on or off for this chat
+                        if (setting.toLowerCase() === "toggleai") {
+                            // no value given just flips whatever it is now
+                            let value = !getGroupSetting(chatId, "toggleai");
+
+                            if (args.length > 2) {
+                                const wanted = args[2].toLowerCase();
+                                if (!["true", "false"].includes(wanted)) {
+                                    await reply(sock, msg, "Usage: !mod toggleai <true|false>, or !mod toggleai on its own to flip it.");
+                                    continue;
+                                }
+                                value = wanted === "true";
+                            }
+
+                            setGroupSetting(chatId, "toggleai", value);
+                            await reply(
+                                sock,
+                                msg,
+                                value
+                                    ? "toggleai set to true. The AI commands work in this chat again."
+                                    : "toggleai set to false. The AI commands are switched off in this chat."
+                            );
+                            continue;
+                        }
+
+                        // !mod drunkmode [true|false] makes every reply in this chat come out drunk
+                        if (setting.toLowerCase() === "drunkmode") {
+                            // no value given just flips whatever it is now
+                            let value = !getGroupSetting(chatId, "drunkmode");
+
+                            if (args.length > 2) {
+                                const wanted = args[2].toLowerCase();
+                                if (!["true", "false"].includes(wanted)) {
+                                    await reply(sock, msg, "Usage: !mod drunkmode <true|false>, or !mod drunkmode on its own to flip it.");
+                                    continue;
+                                }
+                                value = wanted === "true";
+                            }
+
+                            setGroupSetting(chatId, "drunkmode", value);
+                            await reply(
+                                sock,
+                                msg,
+                                value
+                                    ? "drunkmode set to true. The bot is drunk in this chat now."
+                                    : "drunkmode set to false. The bot is sober again."
+                            );
+                            continue;
+                        }
+
                         if (setting.toLowerCase() === "antibadwordreport") {
                             if (args.length === 2) {
                                 await reply(sock, msg, `antibadwordreport is currently ${getGroupSetting(chatId, "antibadwordreport")}`);
@@ -2646,11 +3073,46 @@ Toxicity score: ${result.score}`
                             continue;
                         }
 
+                        if (setting.toLowerCase() === "gametimer") {
+                            if (args.length === 2) {
+                                const current = getGroupSetting(chatId, "gametimer");
+                                await reply(
+                                    sock,
+                                    msg,
+                                    current
+                                        ? "gametimer is currently " + current + " seconds"
+                                        : "gametimer is currently off, games use their normal time"
+                                );
+                                continue;
+                            }
+
+                            const raw = args[2].toLowerCase();
+                            if (raw === "off") {
+                                setGroupSetting(chatId, "gametimer", null);
+                                await reply(sock, msg, "gametimer is off. Games use their normal time again.");
+                                continue;
+                            }
+
+                            const seconds = Number(raw);
+                            if (!Number.isInteger(seconds) || seconds < 10 || seconds > 3600) {
+                                await reply(sock, msg, "Usage: !mod gametimer <10-3600 seconds|off>");
+                                continue;
+                            }
+
+                            setGroupSetting(chatId, "gametimer", seconds);
+                            await reply(
+                                sock,
+                                msg,
+                                "gametimer set to " + seconds + " seconds. Games in this group use it unless a time is given when starting one."
+                            );
+                            continue;
+                        }
+
                         // ----------------------------
                         // Unknown setting
                         // ----------------------------
 
-                        await reply(
+                        await replyTemporary(
                             sock,
                             msg,
                             [
@@ -2665,19 +3127,27 @@ Toxicity score: ${result.score}`
                                 "welcomeMsgEnabled <true|false>",
                                 "welcomeMsg <string>",
                                 "gamesenabled <true|false>",
+                                "casinoenabled <true|false>",
+                                "trustedonly <true|false>",
+                                "toggleai <true|false>",
                                 "disablelinking <true|false>",
                                 "disablelinkingnosay <true|false>",
                                 "linkblocklist <add|remove|clear> <domain>",
                                 "linkwhitelist <add|remove|clear> <domain>",
                                 "linkexempt <true|false>",
                                 "warntoggle <true|false>",
+                                "warntrusted <true|false>",
                                 "warnlimit <1-20>",
                                 "warnaction <kick|ban|notify [duration]>",
                                 "warnexpiry <0-365>",
                                 "warncurses <0-50>",
                                 "warncursestime <1-60>",
-                                "edgypreset <true|false>"
-                            ].join("\n")
+                                "edgypreset <true|false>",
+                                "gametimer <10-3600 seconds|off>",
+                                ...(Math.random() < 0.3 ? ["enablehelpmenu <true|false>"] : []),
+                                "menudeletetime <0|15-60>"
+                            ].join("\n"),
+                            getGroupSetting(chatId, "menudeletetime")
                         );
                     }
 
@@ -2745,6 +3215,8 @@ Toxicity score: ${result.score}`
                                     "debug - Dump message, group, identity, and config details",
                                     "forceban <add|remove|list> [number] - Ban a phone number from using the bot everywhere",
                                     "kickfrom <group id> <number> - Remove a number from a group the bot is in",
+                                    "addmember <phone number> - Add a number to the group you run this in",
+                                    "resetaimodel [model] - Put every chat back on the default ai model, or on one model",
                                 ].join("\n")
                             );
 
@@ -3089,6 +3561,11 @@ Toxicity score: ${result.score}`
                             }
                         } else if (subcommand === "forceban") {
                             await reply(sock, msg, extras.forceBanCommand(args.slice(2)));
+                        } else if (subcommand === "resetaimodel") {
+                            await reply(sock, msg, aitools.resetAllChatModels(args[2]));
+                        } else if (subcommand === "addmember") {
+                            // adds a number to the group this is run in
+                            await extras.addMember(sock, msg, { chatId, isGroup, number: args.slice(2).join("") });
                         } else if (subcommand === "kickfrom") {
                             // one time thing, kicks a number out of a group the bot is in. get the group id from !special listgroups
                             const groupId = args[2] || "";

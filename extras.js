@@ -365,7 +365,7 @@ async function handleTranslate(sock, msg, { text, commandPrefix }) {
 
     const code = LANG_ALIASES[language.toLowerCase()] || language.toLowerCase();
     try {
-        // one singleeee try, google blocking us wont fix itself in a second so no retry here
+        // one quick try, google blocking us wont fix itself in a second so no retry here
         const data = await fetchJson(
             `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(code)}&dt=t&q=${encodeURIComponent(toTranslate)}`,
             5000
@@ -373,7 +373,7 @@ async function handleTranslate(sock, msg, { text, commandPrefix }) {
         await reply(sock, msg, data[0].map(part => part[0]).join(""));
         return;
     } catch {
-        // google blocks the pi a lot, so the local ai takes over from here bleh
+        // google blocks the pi a lot, so the local ai takes over from here
     }
 
     try {
@@ -416,9 +416,10 @@ const silentLogger = {
 
 // !sticker and !animsticker work as a reply to an image, or as the caption of an image or video.
 // Captions are not text messages, so index.js asks captionText() for them.
+// !ai is allowed as a caption too, so you can send a pic with !ai and ask about it right away.
 function captionText(message) {
     const caption = message?.imageMessage?.caption ?? message?.videoMessage?.caption;
-    return typeof caption === "string" && /^!(sticker|animsticker|edit)(\s|$)/i.test(caption.trim())
+    return typeof caption === "string" && /^!(sticker|animsticker|edit|ai)(\s|$)/i.test(caption.trim())
         ? caption.trim()
         : null;
 }
@@ -850,6 +851,7 @@ const NAMED_COLORS = new Set([
 function normalizeColor(raw) {
     if (!raw) return null;
     let color = raw.trim().toLowerCase();
+    if (color === "brown") return "#654321"; // the svg brown is more of a red, so this one is a real brown
     if (NAMED_COLORS.has(color)) return color;
     color = color.replace(/^&?#/, "");
     return /^([0-9a-f]{3}|[0-9a-f]{6})$/.test(color) ? `#${color}` : null;
@@ -1809,25 +1811,21 @@ async function handleExecute(sock, msg, { chatId, text, isGroup, trusted, groupA
     });
 }
 
-// !add
-// !add <phone number> adds that person to the group. the bot has to be a group
-// admin. whatsapp refuses if their privacy settings don't let anyone add them.
+// !special addmember
+// !special addmember <phone number> adds that person to the group you run it in. the bot has to be a
+// group admin. 
 // ============================================================
 
-async function handleAdd(sock, msg, { chatId, text, isGroup, trusted, groupAdmin, commandPrefix }) {
+async function addMember(sock, msg, { chatId, isGroup, number }) {
     if (!isGroup) {
-        await reply(sock, msg, "This command can only be used in a group.");
-        return;
-    }
-    if (!trusted && !groupAdmin) {
-        await reply(sock, msg, "Only group administrators and trusted users may use this command.");
+        await reply(sock, msg, "!special addmember can only be used in a group.");
         return;
     }
 
     // keep just the digits so "+65 9123 4567" works too
-    const digits = argsOf(text).replace(/\D/g, "");
+    const digits = String(number || "").replace(/\D/g, "");
     if (digits.length < 7 || digits.length > 15) {
-        await reply(sock, msg, `Usage: ${commandPrefix}add <phone number with country code>, like ${commandPrefix}add 6591234567`);
+        await reply(sock, msg, "Usage: !special addmember <phone number with country code>, like !special addmember 6591234567");
         return;
     }
 
@@ -1882,6 +1880,14 @@ function liveWarnings(entry, chatId) {
 function cleanWarns() {
     for (const entry of state.warns) {
         entry.times = liveWarnings(entry, entry.chatId);
+        // reasons only matter for warnings that are still around
+        if (entry.reasons) {
+            for (const time of Object.keys(entry.reasons)) {
+                if (!entry.times.includes(Number(time))) {
+                    delete entry.reasons[time];
+                }
+            }
+        }
     }
     state.warns = state.warns.filter(entry => entry.times.length > 0);
 }
@@ -1948,7 +1954,7 @@ async function warnGuard(sock, msg, { chatId, isGroup, trusted, groupAdmin }) {
 
 // records a warning and does whatever the group set for the limit (kick, ban or just saying so).
 // !warn and the automatic curse warnings both use this so they always behave the same
-async function giveWarning(sock, chatId, member, ids, reason) {
+async function giveWarning(sock, chatId, member, ids, reason, isStaff, amount = 1) {
     let entry = warnEntryFor(chatId, ids);
     if (!entry) {
         entry = { chatId, ids, jid: member.id, times: [] };
@@ -1956,7 +1962,16 @@ async function giveWarning(sock, chatId, member, ids, reason) {
     }
     entry.ids = [...new Set([...entry.ids, ...ids])];
     entry.jid = member.id;
-    entry.times = [...liveWarnings(entry, chatId), Date.now()];
+    const now = Date.now();
+    const added = Array.from({ length: amount }, (_, index) => now + index);
+    entry.times = [...liveWarnings(entry, chatId), ...added];
+    // remember why, keyed by the time so it stays matched up when old warnings expire
+    if (reason) {
+        entry.reasons = { ...entry.reasons };
+        for (const time of added) {
+            entry.reasons[time] = reason;
+        }
+    }
     // save the warning first so a failed kick doesnt lose it
     cleanWarns();
     saveState();
@@ -1964,15 +1979,18 @@ async function giveWarning(sock, chatId, member, ids, reason) {
     const count = entry.times.length;
     const limit = getGroupSetting(chatId, "warnlimit");
     const tag = `@${userPart(member.id)}`;
+    // only says how many when it was more than one
+    const times = amount > 1 ? ` ${amount} times` : "";
     const reasonLine = reason ? `\nReason: ${reason}` : "";
     const say = message => sock.sendMessage(chatId, { text: message + reasonLine, mentions: [member.id] });
 
     if (count < limit) {
-        await say(`${tag} has been warned (${count}/${limit}).`);
+        await say(`${tag} has been warned${times} (${count}/${limit}).`);
         return;
     }
 
-    const actions = getGroupSetting(chatId, "warnaction");
+    // trusted people and admins only get the warning count announced, the bot never kicks or bans them
+    const actions = isStaff ? [] : getGroupSetting(chatId, "warnaction");
     // everything that went through gets listed in the message at the end
     const done = [];
     let kickFailed = false;
@@ -2015,9 +2033,9 @@ async function giveWarning(sock, chatId, member, ids, reason) {
 
     const result = done.join(" and ");
     if (kickFailed) {
-        await say(`${tag} has been warned (${count}/${limit}) and ${result}, but I couldn't remove them from the group. Make sure I'm a group administrator.`);
+        await say(`${tag} has been warned${times} (${count}/${limit}) and ${result}, but I couldn't remove them from the group. Make sure I'm a group administrator.`);
     } else {
-        await say(`${tag} has been warned (${count}/${limit})${done.length > 1 ? "," : " and"} ${result}.`);
+        await say(`${tag} has been warned${times} (${count}/${limit})${done.length > 1 ? "," : " and"} ${result}.`);
     }
 }
 
@@ -2029,8 +2047,19 @@ async function handleWarn(sock, msg, ctx) {
 
     const { target, words } = pickTarget(msg, text);
     if (!target) {
-        await reply(sock, msg, `Say who to warn: ${commandPrefix}warn @user [reason], or reply to them with ${commandPrefix}warn [reason].`);
+        await reply(sock, msg, `Say who to warn: ${commandPrefix}warn @user [count] [reason], or reply to them with ${commandPrefix}warn [count] [reason].`);
         return;
+    }
+
+    // a number first means how many warnings to give, so !warn @user 2 spamming gives two
+    let amount = 1;
+    if (words.length && /^\d{1,2}$/.test(words[0])) {
+        amount = Number(words.shift());
+        const limit = getGroupSetting(chatId, "warnlimit");
+        if (amount < 1 || amount > limit) {
+            await reply(sock, msg, `You can give 1 to ${limit} warnings at once.`);
+            return;
+        }
     }
 
     const member = await findMember(sock, chatId, target);
@@ -2045,16 +2074,19 @@ async function handleWarn(sock, msg, ctx) {
         await reply(sock, msg, "I can't warn myself.");
         return;
     }
-    if ([member.id, member.lid, member.phoneNumber, member.jid].some(id => isTrusted(id))) {
+    // !mod warntrusted decides if trusted people and group admins can be warned, it is toggleed on by default
+    const warnStaff = getGroupSetting(chatId, "warntrusted") !== false;
+    const memberTrusted = [member.id, member.lid, member.phoneNumber, member.jid].some(id => isTrusted(id));
+    if (memberTrusted && !warnStaff) {
         await reply(sock, msg, "Trusted users can't be warned.");
         return;
     }
-    if (member.admin) {
+    if (member.admin && !warnStaff) {
         await reply(sock, msg, "Group admins can't be warned.");
         return;
     }
 
-    await giveWarning(sock, chatId, member, ids, words.join(" ").trim());
+    await giveWarning(sock, chatId, member, ids, words.join(" ").trim(), memberTrusted || Boolean(member.admin), amount);
 }
 
 // ----------------------------------------------------
@@ -2085,7 +2117,7 @@ function curseSettings(chatId) {
 // "chatId:person" -> { start, count }
 const curseCounts = new Map();
 
-// same as !warn but the bot hands it out itself (admins and trusted people are skipped)
+// same as !warn but the bot hands it out itself (admins and trusted people only get warned when !mod warntrusted is on)
 async function curseDeleted(sock, msg, { chatId, senderJid }) {
     const { limit, minutes } = curseSettings(chatId);
     // 0 means off, and turning the warn commands off turns this off too
@@ -2102,7 +2134,9 @@ async function curseDeleted(sock, msg, { chatId, senderJid }) {
     const ids = idsOfMember(member);
     const me = [sock.user?.id, sock.user?.lid].filter(Boolean).map(userPart);
     const trusted = [member.id, member.lid, member.phoneNumber, member.jid].some(id => isTrusted(id));
-    if (member.admin || trusted || ids.some(id => me.includes(id))) {
+    // staff (admins/trusted) are only skipped when !mod warntrusted is off
+    const warnStaff = getGroupSetting(chatId, "warntrusted") !== false;
+    if ((!warnStaff && (member.admin || trusted)) || ids.some(id => me.includes(id))) {
         return;
     }
 
@@ -2126,7 +2160,7 @@ async function curseDeleted(sock, msg, { chatId, senderJid }) {
     counter.count += 1;
 
     if (counter.count > limit) {
-        await giveWarning(sock, chatId, member, ids, "Too many deleted messages for cursing.");
+        await giveWarning(sock, chatId, member, ids, "Too many deleted messages for cursing.", Boolean(member.admin) || trusted);
     }
 }
 
@@ -2200,8 +2234,18 @@ async function handleWarnings(sock, msg, ctx) {
 
     const entry = warnEntryFor(chatId, idsOfMember(member));
     const tag = `@${userPart(member.id)}`;
+    if (!entry) {
+        await sock.sendMessage(chatId, { text: `${tag} has no warnings.`, mentions: [member.id] });
+        return;
+    }
+
+    // oldest first. warnings from before reasons got saved just say so
+    const reasonLines = entry.times.map((time, index) => {
+        const reason = entry.reasons?.[time] || "no reason given";
+        return `${index + 1}. ${reason} (${describeDuration(Date.now() - time)} ago)`;
+    });
     await sock.sendMessage(chatId, {
-        text: entry ? `${tag} has ${entry.times.length}/${limit} warnings.` : `${tag} has no warnings.`,
+        text: `${tag} has ${entry.times.length}/${limit} warnings:\n${reasonLines.join("\n")}`,
         mentions: [member.id]
     });
 }
@@ -2336,7 +2380,6 @@ const COMMANDS = {
     "!ban": handleBan,
     "!unban": handleBan,
     "!execute": handleExecute,
-    "!add": handleAdd,
     "!warn": handleWarn,
     "!unwarn": handleUnwarn,
     "!warnings": handleWarnings
@@ -2356,4 +2399,4 @@ async function handleCommand(sock, msg, ctx) {
     return true;
 }
 
-module.exports = { init, handleCommand, captionText, extraCommandsEnabled, isBanned, parseBanTime, describeDuration, curseDeleted, curseSettings, isForceBanned, forceBanCommand };
+module.exports = { init, handleCommand, captionText, extraCommandsEnabled, isBanned, parseBanTime, describeDuration, curseDeleted, curseSettings, isForceBanned, forceBanCommand, addMember };

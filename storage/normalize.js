@@ -49,8 +49,14 @@ function defaultGroupSettings() {
         welcomeMsgEnabled: false,
         welcomeMsg: DEFAULT_WELCOME_MSG,
         gamesenabled: true,
+        // casino games (blackjack, slots) stay off until someone turns them on with !mod casinoenabled
+        casinoenabled: false,
+        // the help menu stays off in every chat until a mod turns it on with !mod enablehelpmenu
+        enablehelpmenu: false,
+        // when this is on only trusted people and group admins can use the bot, off until a mod turns it on
+        trustedonly: false,
         // !ai imagine is off in every chat until a trusted user turns it on
-        aiImagine: false,
+        aiImagine: true,
         // deletes messages with links in them
         disablelinking: false,
         // same as disablelinking but it never says anything in the chat
@@ -60,12 +66,16 @@ function defaultGroupSettings() {
         // domains that are never blocked, even when the blocklist or block-everything rule would catch them
         linkwhitelist: [],
         // admins and trusted people can post links even when linking is disabled
-        linkexempt: true,
+        linkexempt: false,
         // turns the warn commands on or off in this group
         warntoggle: true,
+        // trusted people and group admins can be warned unless a mod turns this off with !mod warntrusted
+        warntrusted: true,
         // how many warnings it takes before the bot does something
         warnlimit: 3,
-        // what happens at the limit: kick, ban or notify (it just announces it). they can all be used together
+        // how many seconds the !mod menu stays up before the bot deletes it, 0 keeps it forever
+        menudeletetime: 15,
+        // what happens at the limit, kick, ban or notify (it just announces it). they can all be used together
         warnaction: ["notify"],
         // how long a warn ban lasts in milliseconds, 0 means until someone unbans them
         warnbanduration: 0,
@@ -80,7 +90,11 @@ function defaultGroupSettings() {
         // the edgy ai personality preset stays hidden until a group turns it on with !mod edgypreset
         edgypreset: false,
         // antibadword's "if this is incorrect, please report it" if it is enabled or nah
-        antibadwordreport: false
+        antibadwordreport: false,
+        // !ai works in every chat until someone turns it off with !mod toggleai
+        toggleai: true,
+        drunkmode: false,
+        gametimer: null
     };
 }
 
@@ -136,6 +150,12 @@ function normalizeGroupSettings(raw) {
     settings.gamesenabled =
         coerceBoolean(raw.gamesenabled ?? raw.gamesEnabled, true);
 
+    settings.casinoenabled = coerceBoolean(raw.casinoenabled, false);
+
+    settings.enablehelpmenu = coerceBoolean(raw.enablehelpmenu, false);
+
+    settings.trustedonly = coerceBoolean(raw.trustedonly, false);
+
     settings.aiImagine =
         coerceBoolean(raw.aiImagine, false);
 
@@ -170,10 +190,17 @@ function normalizeGroupSettings(raw) {
     settings.warntoggle =
         coerceBoolean(raw.warntoggle, true);
 
+    settings.warntrusted = coerceBoolean(raw.warntrusted, true);
+
     settings.warnlimit =
         Number.isInteger(raw.warnlimit) && raw.warnlimit >= 1 && raw.warnlimit <= 20
             ? raw.warnlimit
             : 3;
+
+    settings.menudeletetime =
+        Number.isInteger(raw.menudeletetime) && (raw.menudeletetime === 0 || (raw.menudeletetime >= 15 && raw.menudeletetime <= 60))
+            ? raw.menudeletetime
+            : 30;
 
     settings.warnaction = normalizeWarnActions(raw.warnaction);
 
@@ -207,6 +234,15 @@ function normalizeGroupSettings(raw) {
         : [];
 
     settings.antibadwordreport = coerceBoolean(raw.antibadwordreport, false);
+
+    settings.toggleai = coerceBoolean(raw.toggleai, true);
+
+    settings.drunkmode = coerceBoolean(raw.drunkmode, false);
+
+    settings.gametimer =
+        Number.isInteger(raw.gametimer) && raw.gametimer >= 10 && raw.gametimer <= 3600
+            ? raw.gametimer
+            : null;
 
     for (const key of Object.keys(raw)) {
         if (!(key in settings)) {

@@ -3,3 +3,7 @@ uvicorn[standard]
 detoxify
 transformers
 torch
+# only used when BADWORD_VISION is 1
+pillow
+numpy
+rapidocr-onnxruntime
