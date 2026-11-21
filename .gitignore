@@ -44,7 +44,6 @@ pids
 /config.json
 *.config.json
 *-config.json
-!/messages.json
 
 # Editor & IDE Files
 .vscode/
