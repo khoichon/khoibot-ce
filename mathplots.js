@@ -451,20 +451,20 @@ class Environment {
 // BUILT-INS
 // =============================================================================
 
-function factorial(n) {
-    if (!Number.isFinite(n)) return NaN;
+function factorial(n, step = 1) {
+    if (!Number.isFinite(n) || ![1, 2, 3].includes(step)) return NaN;
 
     n = Math.round(n);
 
-    if (n < 0 || n > 170) return NaN;
+    if (n < 1 - step || n > 1000) return NaN;
 
     let result = 1;
 
-    for (let i = 2; i <= n; i++) {
+    for (let i = n; i > 1; i -= step) {
         result *= i;
     }
 
-    return result;
+    return Number.isFinite(result) ? result : NaN;
 }
 
 function gcd(a, b) {
@@ -573,6 +573,8 @@ const BUILTINS = {
 
     fact: factorial,
     factorial,
+    dfact: n => factorial(n, 2),
+    tfact: n => factorial(n, 3),
 
     gcd,
     lcm,
@@ -820,8 +822,16 @@ class Parser {
         while (this.current().value === '!') {
             this.consume('!');
 
+            let step = 1;
+
+            while (step < 3 && this.current().value === '!') {
+                this.consume('!');
+                step++;
+            }
+
             node = {
                 type: 'factorial',
+                step,
                 value: node
             };
         }
@@ -1032,7 +1042,8 @@ function evaluate(node, env) {
 
         case 'factorial':
             return factorial(
-                evaluate(node.value, env)
+                evaluate(node.value, env),
+                node.step
             );
 
         case 'conditional':

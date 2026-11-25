@@ -35,11 +35,9 @@ pids
 .env
 .env.*
 !.env.example
-
-# Local runtime configuration and credentials
-/auth/
-/bot-config.json
-/credentials.json
+auth/
+bot-config.json
+credentials.json
 /config/
 /config.json
 *.config.json
@@ -53,7 +51,6 @@ pids
 *.njsproj
 *.sln
 *.swp
-
 # OS Metadata
 .DS_Store
 Thumbs.db

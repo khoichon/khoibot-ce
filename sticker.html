@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+    this is the page !ttscss takes a picture of. the bot reads this file again for every
+    sticker, so edits show up in the next sticker, no restart needed.
+    renderSticker() at the bottom is what the bot calls with the text and the styles.
+-->
+<style>
+    html, body {
+        margin: 0;
+        width: 512px;
+        height: 512px;
+        overflow: hidden;
+    }
+    body {
+        background: #000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    #text {
+        box-sizing: border-box;
+        max-width: 480px;
+        padding: 16px;
+        color: #fff;
+        font-family: sans-serif;
+        font-weight: bold;
+        font-size: 120px;
+        line-height: 1.2;
+        text-align: center;
+        overflow-wrap: normal;
+    }
+</style>
+</head>
+<body>
+<div id="text"></div>
+<script>
+    function renderSticker(options) {
+        const box = document.getElementById("text");
+        box.textContent = options.text;
+        box.style.cssText = options.css || "";
+        if (options.sized && !box.style.overflowWrap) {
+            box.style.overflowWrap = "anywhere";
+        }
+        if (options.bg) {
+            document.body.style.background = options.bg;
+        }
+
+        if (!options.sized) {
+            let size = 160;
+            box.style.fontSize = size + "px";
+            while (size > 14 && (box.scrollWidth > 500 || box.offsetHeight > 500)) {
+                size -= 4;
+                box.style.fontSize = size + "px";
+            }
+            if (box.scrollWidth > 500) {
+                box.style.overflowWrap = "anywhere";
+            }
+        }
+    }
+</script>
+</body>
+</html>

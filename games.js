@@ -1354,6 +1354,8 @@ function activeExtraGame(groupId) {
     if (wordChainGames.has(groupId)) return "word chain";
     if (minesweeperGames.has(groupId)) return "minesweeper";
     if (crosswordGames.has(groupId)) return "crossword";
+    if (hangmanGames.has(groupId)) return "hangman";
+    if (triviaGames.has(groupId)) return "trivia";
     return null;
 }
 
@@ -1450,6 +1452,8 @@ function blockingExtraGame(groupId, jid) {
     if (wordChainGames.has(groupId)) return "word chain";
     if (minesweeperGames.has(groupId)) return "minesweeper";
     if (crosswordGames.has(groupId)) return "crossword";
+    if (hangmanGames.has(groupId)) return "hangman";
+    if (triviaGames.has(groupId)) return "trivia";
     return null;
 }
 
@@ -3932,6 +3936,304 @@ async function handleConnect4Move(sock, chatId, senderJid, text) {
     return true;
 }
 
+
+const HANGMAN_GAME_MS = 3 * 60 * 1000;
+const HANGMAN_MAX_MISSES = 6;
+const hangmanGames = new Map();
+
+const HANGMAN_PARTS = [
+    `<circle cx="250" cy="125" r="25"/>`,
+    `<line x1="250" y1="150" x2="250" y2="230"/>`,
+    `<line x1="250" y1="170" x2="215" y2="205"/>`,
+    `<line x1="250" y1="170" x2="285" y2="205"/>`,
+    `<line x1="250" y1="230" x2="220" y2="290"/>`,
+    `<line x1="250" y1="230" x2="280" y2="290"/>`
+];
+
+function hangmanSvg(game, reveal) {
+    const letters = [...game.word].map(letter => (reveal || game.guessed.has(letter) ? letter.toUpperCase() : "_"));
+    const wordSize = Math.min(44, Math.floor(440 / (letters.length * 1.3)));
+    const missed = game.misses.map(miss => miss.toUpperCase()).join(" ");
+
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="420">` +
+        `<rect width="480" height="420" fill="#111111"/>` +
+        `<g stroke="#eeeeee" stroke-width="6" stroke-linecap="round" fill="none">` +
+        `<line x1="40" y1="320" x2="200" y2="320"/><line x1="120" y1="320" x2="120" y2="60"/>` +
+        `<line x1="120" y1="60" x2="250" y2="60"/><line x1="250" y1="60" x2="250" y2="100"/>` +
+        `${HANGMAN_PARTS.slice(0, game.misses.length).join("")}</g>` +
+        `<text x="240" y="355" font-family="DejaVu Sans, sans-serif" font-size="22" fill="#ff8a8a" text-anchor="middle">${missed ? `Missed: ${missed}` : ""}</text>` +
+        `<text x="240" y="400" font-family="DejaVu Sans Mono, monospace" font-size="${wordSize}" font-weight="bold" fill="#ffffff" text-anchor="middle" xml:space="preserve">${letters.join(" ")}</text>` +
+        `</svg>`;
+}
+
+async function sendHangman(sock, chatId, game, caption, mentions = [], reveal = false) {
+    const image = await sharp(Buffer.from(hangmanSvg(game, reveal))).png().toBuffer();
+    await sock.sendMessage(chatId, { image, caption, mentions });
+}
+
+async function hangmanGuess(sock, msg, chatId, senderJid, game, guess) {
+    if (guess.length === 1) {
+        if (game.guessed.has(guess) || game.misses.includes(guess)) {
+            await reply(sock, msg, `${guess.toUpperCase()} was already guessed.`);
+            return;
+        }
+        if (game.word.includes(guess)) {
+            game.guessed.add(guess);
+        } else {
+            game.misses.push(guess);
+        }
+    } else {
+        for (const letter of game.word) game.guessed.add(letter);
+    }
+
+    const won = [...game.word].every(letter => game.guessed.has(letter));
+    const lost = !won && game.misses.length >= HANGMAN_MAX_MISSES;
+    if (won || lost) {
+        clearGameTimers(game);
+        hangmanGames.delete(chatId);
+        log.info("games", `Hangman in ${describeGroup(chatId)} ended, ${won ? "won" : "lost"}. The word was: ${game.word}`);
+        if (won) {
+            await sendHangman(sock, chatId, game, `${tag(senderJid)} got it. The word was "${game.word}".`, [senderJid]);
+        } else {
+            await sendHangman(sock, chatId, game, `The man was hanged. The word was "${game.word}".`, [], true);
+        }
+        return;
+    }
+
+    const hit = game.word.includes(guess);
+    await sendHangman(sock, chatId, game, guess.length === 1 ? (hit ? `${guess.toUpperCase()} is in the word.` : `No ${guess.toUpperCase()}.`) : "");
+}
+
+async function handleHangman(sock, msg, ctx) {
+    const { chatId, senderJid, text, trusted, commandPrefix } = ctx;
+    if (!await gameAllowed(sock, msg, ctx, "hangman")) {
+        return;
+    }
+
+    const argument = text.slice("!hangman".length).trim().toLowerCase();
+    const game = hangmanGames.get(chatId);
+
+    if (argument === "cancel") {
+        if (!game) {
+            await reply(sock, msg, "There is no hangman game to cancel.");
+            return;
+        }
+        if (!game.loading && !sameWho(senderIds(msg), game.starterIds) && !trusted) {
+            await reply(sock, msg, "Only the player who started the game or a trusted user can cancel it.");
+            return;
+        }
+        clearGameTimers(game);
+        hangmanGames.delete(chatId);
+        await reply(sock, msg, game.loading ? "The hangman game was cancelled." : `The hangman game was cancelled. The word was "${game.word}".`);
+        return;
+    }
+
+    if (argument && game && !game.loading && /^[a-z]$/.test(argument)) {
+        await hangmanGuess(sock, msg, chatId, senderJid, game, argument);
+        return;
+    }
+    if (argument) {
+        await reply(sock, msg, `Usage: ${commandPrefix}hangman [cancel]`);
+        return;
+    }
+
+    if (game) {
+        if (!game.loading) {
+            await sendHangman(sock, chatId, game, "");
+        }
+        return;
+    }
+
+    if (!await canStartGame(sock, msg, chatId, senderJid)) {
+        return;
+    }
+
+    const newGame = { loading: true, word: null, guessed: new Set(), misses: [], starterIds: senderIds(msg), timeout: null };
+    hangmanGames.set(chatId, newGame);
+    try {
+        const word = await randomWord("1", 7);
+        if (hangmanGames.get(chatId) !== newGame) {
+            return;
+        }
+        if (typeof word !== "string" || !/^[a-z]{3,}$/i.test(word)) {
+            hangmanGames.delete(chatId);
+            await reply(sock, msg, "I could not get a word. Please try again.");
+            return;
+        }
+
+        newGame.word = word.toLowerCase();
+        newGame.loading = false;
+        log.info("games", `Starting hangman in ${describeGroup(chatId)} with word: ${newGame.word}`);
+        armTimer(sock, hangmanGames, chatId, newGame, gameMs(chatId, HANGMAN_GAME_MS), "Time is up, so the hangman game ended.", game => `The word was "${game.word}".`);
+        await sendHangman(sock, chatId, newGame, `Hangman. Send a letter to guess, or the whole word. ${HANGMAN_MAX_MISSES} misses and it is over. You have ${formatGameTime(gameMs(chatId, HANGMAN_GAME_MS))}.`);
+    } catch (error) {
+        if (hangmanGames.get(chatId) === newGame) {
+            hangmanGames.delete(chatId);
+            clearGameTimers(newGame);
+        }
+        log.error("games", "Error starting hangman:", error);
+        await reply(sock, msg, "Something went wrong starting the hangman game.");
+    }
+}
+
+async function handleHangmanAnswer(sock, msg, chatId, senderJid, text) {
+    const game = hangmanGames.get(chatId);
+    if (!game || game.loading) {
+        return false;
+    }
+
+    const guess = text.trim().toLowerCase();
+    if (!/^[a-z]$/.test(guess) && guess !== game.word) {
+        return false;
+    }
+
+    await hangmanGuess(sock, msg, chatId, senderJid, game, guess);
+    return true;
+}
+
+const TRIVIA_GAME_MS = 30 * 1000;
+const triviaGames = new Map();
+
+async function fetchTriviaQuestion() {
+    const response = await fetch("https://opentdb.com/api.php?amount=1&type=multiple&encode=url3986", {
+        signal: AbortSignal.timeout(6000),
+        headers: { "User-Agent": "khoibot (whatsapp bot)" }
+    });
+    if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    if (data.response_code === 5) {
+        return "busy";
+    }
+    const item = data.results?.[0];
+    if (!item) {
+        throw new Error("no question in the response");
+    }
+
+    const decode = value => decodeURIComponent(value);
+    const answers = [decode(item.correct_answer), ...item.incorrect_answers.map(decode)];
+    for (let index = answers.length - 1; index > 0; index--) {
+        const other = randomInt(0, index);
+        [answers[index], answers[other]] = [answers[other], answers[index]];
+    }
+    return {
+        question: decode(item.question),
+        category: decode(item.category),
+        difficulty: decode(item.difficulty),
+        answers,
+        correct: answers.indexOf(decode(item.correct_answer))
+    };
+}
+
+const TRIVIA_LETTERS = ["A", "B", "C", "D"];
+
+function triviaText(game) {
+    const options = game.answers.map((answer, index) => `${TRIVIA_LETTERS[index]}) ${answer}`);
+    return `Trivia (${game.category}, ${game.difficulty})\n${game.question}\n\n${options.join("\n")}`;
+}
+
+function triviaAnswerText(game) {
+    return `${TRIVIA_LETTERS[game.correct]}) ${game.answers[game.correct]}`;
+}
+
+async function handleTrivia(sock, msg, ctx) {
+    const { chatId, senderJid, text, trusted, commandPrefix } = ctx;
+    if (!await gameAllowed(sock, msg, ctx, "trivia")) {
+        return;
+    }
+
+    const argument = text.slice("!trivia".length).trim().toLowerCase();
+    const game = triviaGames.get(chatId);
+
+    if (argument === "cancel") {
+        if (!game) {
+            await reply(sock, msg, "There is no trivia question to cancel.");
+            return;
+        }
+        if (!game.loading && !sameWho(senderIds(msg), game.starterIds) && !trusted) {
+            await reply(sock, msg, "Only the player who started the question or a trusted user can cancel it.");
+            return;
+        }
+        clearGameTimers(game);
+        triviaGames.delete(chatId);
+        await reply(sock, msg, game.loading ? "The trivia question was cancelled." : `The trivia question was cancelled. The answer was ${triviaAnswerText(game)}.`);
+        return;
+    }
+    if (argument) {
+        await reply(sock, msg, `Usage: ${commandPrefix}trivia [cancel]`);
+        return;
+    }
+
+    if (game) {
+        if (!game.loading) {
+            await reply(sock, msg, triviaText(game));
+        }
+        return;
+    }
+
+    if (!await canStartGame(sock, msg, chatId, senderJid)) {
+        return;
+    }
+
+    const newGame = { loading: true, tried: new Set(), starterIds: senderIds(msg), timeout: null };
+    triviaGames.set(chatId, newGame);
+    try {
+        const question = await fetchTriviaQuestion();
+        if (triviaGames.get(chatId) !== newGame) {
+            return;
+        }
+        if (question === "busy") {
+            triviaGames.delete(chatId);
+            await reply(sock, msg, "Trivia is busy right now. Please try again in a few seconds.");
+            return;
+        }
+
+        Object.assign(newGame, question, { loading: false });
+        log.info("games", `Starting trivia in ${describeGroup(chatId)}: ${question.question} The answer is ${triviaAnswerText(newGame)}`);
+        armTimer(sock, triviaGames, chatId, newGame, gameMs(chatId, TRIVIA_GAME_MS), "Time is up, so nobody got it.", game => `The answer was ${triviaAnswerText(game)}.`);
+        await reply(sock, msg, `${triviaText(newGame)}\n\nSend A, B, C or D. You have ${formatGameTime(gameMs(chatId, TRIVIA_GAME_MS))}.`);
+    } catch (error) {
+        if (triviaGames.get(chatId) === newGame) {
+            triviaGames.delete(chatId);
+            clearGameTimers(newGame);
+        }
+        log.error("games", "Error starting trivia:", error);
+        await reply(sock, msg, "I could not get a trivia question. Please try again later.");
+    }
+}
+
+async function handleTriviaAnswer(sock, msg, chatId, senderJid, text) {
+    const game = triviaGames.get(chatId);
+    if (!game || game.loading) {
+        return false;
+    }
+
+    const pick = text.trim().toUpperCase();
+    const index = /^[A-D]$/.test(pick) ? TRIVIA_LETTERS.indexOf(pick) : /^[1-4]$/.test(pick) ? Number(pick) - 1 : -1;
+    if (index === -1) {
+        return false;
+    }
+    if (game.tried.has(senderJid)) {
+        return true;
+    }
+
+    if (index === game.correct) {
+        clearGameTimers(game);
+        triviaGames.delete(chatId);
+        log.info("games", `${describeSender(msg)} got the trivia question in ${describeGroup(chatId)}`);
+        await sock.sendMessage(chatId, {
+            text: `${tag(senderJid)} got it first. The answer was ${triviaAnswerText(game)}.`,
+            mentions: [senderJid]
+        });
+        return true;
+    }
+
+    game.tried.add(senderJid);
+    await reply(sock, msg, "Wrong. You are out for this question.");
+    return true;
+}
+
 // chess keeps its own games, it only borrows the timer and tag helpers from here, plus the saved map so a restart doesnt wipe its games
 const chess = chessgame.create({ gameAllowed, canStartGame, armTimer, clearGameTimers, tag, GameMap: SavedMap });
 
@@ -3951,7 +4253,9 @@ const EXTRA_COMMANDS = {
     "!slots": handleSlots,
     "!wordchain": handleWordChain,
     "!minesweeper": handleMinesweeper,
-    "!crossword": handleCrossword
+    "!crossword": handleCrossword,
+    "!hangman": handleHangman,
+    "!trivia": handleTrivia
 };
 
 
@@ -4080,6 +4384,8 @@ async function handleAnswer(sock, msg, { chatId, senderJid, text }) {
         if (await handleAnagramAnswer(sock, msg, chatId, senderJid, text)) return true;
         if (await handleBlackjackMove(sock, msg, chatId, senderJid, text)) return true;
         if (await handleWordChainAnswer(sock, msg, chatId, senderJid, text)) return true;
+        if (await handleHangmanAnswer(sock, msg, chatId, senderJid, text)) return true;
+        if (await handleTriviaAnswer(sock, msg, chatId, senderJid, text)) return true;
         if (await handleMinesweeperAnswer(sock, msg, chatId, senderJid, text)) return true;
             if (await handleCrosswordAnswer(sock, msg, chatId, senderJid, text)) return true;
     }

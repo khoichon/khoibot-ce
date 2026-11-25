@@ -19,7 +19,7 @@ const {
 
 const qrcode = require("qrcode-terminal");
 
-const { getText, reply, replyTemporary } = require("./utils.js");
+const { getText, reply, replyTemporary, rememberKey } = require("./utils.js");
 
 const aitools = require("./aitools.js");
 const chatlog = require("./chatlog.js");
@@ -44,6 +44,9 @@ const {
 const games = require("./games.js");
 const autoDeploy = require("./autodeploy.js");
 const extras = require("./extras.js");
+const web = require("./web.js");
+const tools = require("./tools.js");
+const slowmode = require("./slowmode.js");
 const antiban = require("./antiban.js");
 const help = require("./help.js");
 const logging = require("./logging.js");
@@ -80,7 +83,9 @@ const commandPrefix = devMode ? "t!" : "!";
 
 // the antibadword only skips real commands. if it skipped everything that starts with ! anyone could put a ! in front of a bad word
 const KNOWN_COMMANDS = new Set([
-    "ai", "anagram", "animsticker", "antiban", "automute", "autounmute", "ban", "blackjack", "bot", "cat", "chess", "coin", "compliment", "connect4", "credits", "crossword", "decrypt", "define", "docs", "dog", "down", "drunkify", "edit", "execute", "fact", "help", "hotpotato", "joke", "math", "meme", "menu", "messagecooldown", "messagedelay", "minesweeper", "mod", "mute", "numguess", "pass", "pfp", "plane", "plot", "quote", "roast", "roll", "rps", "scp", "slots", "special", "sticker", "summarise", "tag", "tournament", "translate", "tts", "ttt", "unban", "unmute", "unwarn", "up", "warn", "warnings", "weather", "whoami", "wiki", "wordchain", "wordle"
+    "archive", "deletemessages", "dns", "expand", "flight", "gif", "github", "hn", "image", "ip", "isup", "news", "pinghost", "pokemon", "qr", "read", "reddit", "redirects", "screenshot", "song", "tldr", "youtube",
+    "video", "ytinfo", "ttscss", "hangman", "removebg", "slowmode", "togif", "toimage", "tomp3", "trivia",
+    "ai", "anagram", "animsticker", "antiban", "automute", "autounmute", "ban", "blackjack", "blacklist", "bot", "cat", "chess", "coin", "compliment", "connect4", "credits", "crossword", "decrypt", "define", "docs", "dog", "down", "drunkify", "edit", "execute", "fact", "help", "hotpotato", "joke", "math", "meme", "menu", "messagecooldown", "messagedelay", "minesweeper", "mod", "mute", "numguess", "pass", "pfp", "plane", "plot", "quote", "roast", "roll", "rps", "scp", "slots", "special", "sticker", "summarise", "tag", "tournament", "translate", "tts", "ttt", "unban", "unmute", "unwarn", "up", "warn", "warnings", "weather", "websearch", "whoami", "wiki", "wordchain", "wordle"
 ]);
 
 const WORDLE_SUBCOMMANDS = new Set(["", "cancel", "hint"]);
@@ -288,6 +293,21 @@ const startSock = async () => {
     // log what the bot sends back, so the console shows each reply under its command.
     // this has to run before antiban.init so the line shows up when the message really goes out.
     logging.watchReplies(sock);
+
+    const sendPlain = sock.sendMessage.bind(sock);
+    sock.sendMessage = (jid, content, ...rest) => {
+        if (String(jid).endsWith("@g.us") && getGroupSetting(jid, "drunkmode")) {
+            const drunkContent = { ...content };
+            if (typeof drunkContent.text === "string") {
+                drunkContent.text = drunkify(drunkContent.text);
+            }
+            if (typeof drunkContent.caption === "string") {
+                drunkContent.caption = drunkify(drunkContent.caption);
+            }
+            content = drunkContent;
+        }
+        return sendPlain(jid, content, ...rest);
+    };
 
     // Both only do anything when their env flag is set.
     antiban.init(sock);
@@ -694,6 +714,34 @@ const startSock = async () => {
                 return;
             }
 
+            const newcomers = [];
+            const blacklisted = [];
+            for (const entry of participants) {
+                const ids = typeof entry === "string" ? [entry] : [entry?.id, entry?.phoneNumber, entry?.lid];
+                (extras.isBlacklisted(ids) ? blacklisted : newcomers).push(entry);
+            }
+
+            if (blacklisted.length) {
+                try {
+                    if (await isBotAdmin(groupId)) {
+                        await sock.groupParticipantsUpdate(
+                            groupId,
+                            blacklisted.map(entry => typeof entry === "string" ? entry : entry.id),
+                            "remove"
+                        );
+                        log.info("group", "Removed a blacklisted member from " + logging.describeGroup(groupId));
+                    } else {
+                        log.info("group", "A blacklisted member joined " + logging.describeGroup(groupId) + " but the bot is not admin there");
+                    }
+                } catch (error) {
+                    log.error("group", "Could not remove a blacklisted member:", error);
+                }
+            }
+
+            if (!newcomers.length) {
+                return;
+            }
+
             const welcomeMsgEnabled =
                 getGroupSetting(
                     groupId,
@@ -712,7 +760,7 @@ const startSock = async () => {
             // If the welcome message is not a string, default to a standard message.
             const welcomeMsg = typeof welcomeMsgTemplate === "string" ? welcomeMsgTemplate : "Welcome to the group, [user]!";
 
-            await sendWelcomeMessage(sock, groupId, participants, welcomeMsg);
+            await sendWelcomeMessage(sock, groupId, newcomers, welcomeMsg);
         }
     );
 
@@ -738,6 +786,7 @@ const startSock = async () => {
                 if (antiban.isStale(msg)) {
                     continue;
                 }
+                rememberKey(msg.key.remoteJid, msg.key);
 
 
                 try {
@@ -772,7 +821,7 @@ const startSock = async () => {
 
                 if (verdict && verdict.bad) {
                     log.info("mod",
-                        "Detected bad " + verdict.kind + " (" + verdict.reason + ", " + verdict.score + ")"
+                        "Detected bad " + verdict.kind + " in " + logging.describeGroup(mediaChatId) + " (" + verdict.reason + ", " + verdict.score + ")"
                     );
 
                     const botIsAdmin = await isBotAdmin(mediaChatId);
@@ -812,9 +861,18 @@ const startSock = async () => {
                 }
             }
 
+            const mediaTag = logging.mediaLabel(msg.message);
+
             if (!receivedText) {
-                        continue;
-                    }
+                if (mediaTag) {
+                    console.log(
+                        logging.betterLoggingEnabled()
+                            ? logging.formatMessage({ msg, text: mediaTag })
+                            : `[${msg.key.remoteJid}] [${msg.key.participant || msg.key.remoteJid}] ${mediaTag}`
+                    );
+                }
+                continue;
+            }
 
                     if (devMode && receivedText.startsWith("!")) {
                         continue;
@@ -885,7 +943,7 @@ const startSock = async () => {
                     if (logging.betterLoggingEnabled()) {
 
                         console.log(
-                            logging.formatMessage({ msg, text })
+                            logging.formatMessage({ msg, text: mediaTag ? mediaTag + " " + text : text })
                         );
 
                     } else {
@@ -893,7 +951,7 @@ const startSock = async () => {
                         console.log(
                             `[${chatId}] ` +
                             `[${senderPN || senderLID}] ` +
-                            `${text}`
+                            `${mediaTag ? mediaTag + " " : ""}${text}`
                         );
                     }
 
@@ -1121,6 +1179,15 @@ Toxicity score: ${result.score}`
                         }
                     }
 
+
+                    if (isGroup && slowmode.tooFast({ chatId, senderJid, trusted, groupAdmin })) {
+                        // no admin rights means no deleting, so the message is just ignored
+                        if (await isBotAdmin(chatId)) {
+                            await sock.sendMessage(msg.key.remoteJid, { delete: msg.key });
+                        }
+                        continue;
+                    }
+
                     // moderation is done, so banned people stop here
                     if (banned) {
                         continue;
@@ -1150,6 +1217,18 @@ Toxicity score: ${result.score}`
                     }
 
                     if (await games.handleCommand(sock, msg, { chatId, senderJid, text, isGroup, trusted, commandPrefix })) {
+                        continue;
+                    }
+
+                    if (await web.handleCommand(sock, msg, { chatId, senderJid, text, isGroup, trusted, groupAdmin, commandPrefix })) {
+                        continue;
+                    }
+
+                    if (await tools.handleCommand(sock, msg, { chatId, senderJid, text, isGroup, trusted, groupAdmin, commandPrefix })) {
+                        continue;
+                    }
+
+                    if (await slowmode.handleCommand(sock, msg, { chatId, senderJid, text, isGroup, trusted, groupAdmin, commandPrefix })) {
                         continue;
                     }
 
@@ -1259,8 +1338,18 @@ Toxicity score: ${result.score}`
                                 });
                                 continue;
                             }
+                            if (firstWord === "witt") {
+                                await aitools.handleWitt(sock, msg, { chatId });
+                                continue;
+                            }
                             const ownPicture = (await mediamod.getPicture(sock, msg, true))?.buffer;
                             const isChat = (firstWord || ownPicture) && firstWord !== "personality" && firstWord !== "reset";
+                            const voiceFlag = isChat ? aitools.takeVoiceFlag(text.slice("!ai".length)) : null;
+                            const aiPrompt = voiceFlag ? voiceFlag.prompt : text.slice("!ai".length);
+                            if (voiceFlag?.empty && !ownPicture) {
+                                await reply(sock, msg, "Tell me what to say, like !ai how are you -voice es");
+                                continue;
+                            }
                             // show "typing..." while the model thinks. whatsapp drops it after a few seconds
                             // so we keep poking it until the answer is ready.
                             const sendPresence = (state) => Promise.resolve().then(() => sock.sendPresenceUpdate(state, msg.key.remoteJid)).catch(() => {});
@@ -1276,11 +1365,22 @@ Toxicity score: ${result.score}`
                                     name: msg.pushName || "Someone",
                                     recentText: isGroup ? chatlog.recent(chatId, 10).text : ""
                                 } : undefined;
-                                answer = await aitools.handleAi(chatId, text.slice("!ai".length), aiContext, ownPicture);
+                                answer = await aitools.handleAi(chatId, aiPrompt, aiContext, ownPicture);
                             } finally {
                                 if (typingTimer) {
                                     clearInterval(typingTimer);
                                     sendPresence("paused");
+                                }
+                            }
+                            if (voiceFlag) {
+                                try {
+                                    const audio = await aitools.voiceNote(answer, voiceFlag.accent);
+                                    if (audio) {
+                                        await sock.sendMessage(msg.key.remoteJid, { audio, mimetype: "audio/ogg; codecs=opus", ptt: true }, { quoted: msg });
+                                        continue;
+                                    }
+                                } catch (error) {
+                                    log.error("ai", "Could not make the voice note, sending text instead:", error);
                                 }
                             }
                             // in groups the answer starts with a ping/mention so the person who asked actually sees it
@@ -1386,7 +1486,7 @@ Toxicity score: ${result.score}`
                         await reply(
                             sock,
                             msg,
-                            "Minesweeper and Connect 4 credit goes to ASHBot."
+                            "Minesweeper and Connect 4 credit goes to ASHBot, and the !youtube credit goes to RuBot."
                         );
                     }
 
@@ -2037,6 +2137,8 @@ Toxicity score: ${result.score}`
                         );
                     }
 
+                   
+
                     // ----------------------------------------------------
                     // !pfp [@user | phone number]
                     // Sends the profile picture of the user
@@ -2237,6 +2339,7 @@ Toxicity score: ${result.score}`
                                     "Games",
                                     `  gamesenabled: ${getGroupSetting(chatId, "gamesenabled")}  (true|false)`,
                                     `  casinoenabled: ${getGroupSetting(chatId, "casinoenabled")}  (true|false)`,
+                                    `  downloadmedia: ${getGroupSetting(chatId, "downloadmedia")}  (true|false)`,
                                     "",
                                     "AI",
                                     `  toggleai: ${getGroupSetting(chatId, "toggleai")}  (true|false)`,
@@ -2506,6 +2609,27 @@ Toxicity score: ${result.score}`
                                 value === "true"
                                     ? "casinoenabled set to true. Casino games work here as long as gamesenabled is also on."
                                     : "casinoenabled set to false. Casino games are switched off in this chat."
+                            );
+                            continue;
+                        }
+
+                        if (args[1]?.toLowerCase() === "downloadmedia") {
+                            if (args.length === 2) {
+                                await reply(sock, msg, `downloadmedia is currently ${getGroupSetting(chatId, "downloadmedia")}`);
+                                continue;
+                            }
+                            const value = args[2].toLowerCase();
+                            if (!["true", "false"].includes(value)) {
+                                await reply(sock, msg, "Usage: !mod downloadmedia <true|false>");
+                                continue;
+                            }
+                            setGroupSetting(chatId, "downloadmedia", value === "true");
+                            await reply(
+                                sock,
+                                msg,
+                                value === "true"
+                                    ? "downloadmedia set to true. !song and !video work in this chat."
+                                    : "downloadmedia set to false. !song and !video are switched off in this chat."
                             );
                             continue;
                         }
@@ -3128,6 +3252,7 @@ Toxicity score: ${result.score}`
                                 "welcomeMsg <string>",
                                 "gamesenabled <true|false>",
                                 "casinoenabled <true|false>",
+                                "downloadmedia <true|false>",
                                 "trustedonly <true|false>",
                                 "toggleai <true|false>",
                                 "disablelinking <true|false>",
@@ -3151,6 +3276,15 @@ Toxicity score: ${result.score}`
                         );
                     }
 
+                    if (text === "!blacklist" || text.startsWith("!blacklist ")) {
+                        if (!trusted) {
+                            await reply(sock, msg, "You aren't trusted.");
+                            continue;
+                        }
+
+                        await reply(sock, msg, extras.blacklistCommand(text.trim().split(/\s+/).slice(1)));
+                        continue;
+                    }
 
                     // ----------------------------------------------------
                     // !special
@@ -3215,6 +3349,7 @@ Toxicity score: ${result.score}`
                                     "debug - Dump message, group, identity, and config details",
                                     "forceban <add|remove|list> [number] - Ban a phone number from using the bot everywhere",
                                     "kickfrom <group id> <number> - Remove a number from a group the bot is in",
+                                    "sendmessage <group id or name> <message> - Send a message to a group the bot is in",
                                     "addmember <phone number> - Add a number to the group you run this in",
                                     "resetaimodel [model] - Put every chat back on the default ai model, or on one model",
                                 ].join("\n")
@@ -3566,6 +3701,34 @@ Toxicity score: ${result.score}`
                         } else if (subcommand === "addmember") {
                             // adds a number to the group this is run in
                             await extras.addMember(sock, msg, { chatId, isGroup, number: args.slice(2).join("") });
+                        } else if (subcommand === "sendmessage") {
+                            const rest = text.replace(/^!special\s+sendmessage\s*/, "");
+                            const quoted = rest.match(/^["'“‘](.+?)["'”’]\s+([\s\S]+)$/);
+                            const parts = quoted || rest.match(/^(\S+)\s+([\s\S]+)$/);
+                            if (!parts) {
+                                await reply(sock, msg, "Usage: !special sendmessage <group id or name> <message>. Put the name in quotes if it has spaces, like !special sendmessage \"My Group\" hello");
+                            } else {
+                                const target = parts[1].trim();
+                                const body = parts[2].trim();
+                                try {
+                                    const groups = Object.values(await sock.groupFetchAllParticipating());
+                                    const matches = target.endsWith("@g.us")
+                                        ? groups.filter(group => group.id === target)
+                                        : groups.filter(group => (group.subject || "").trim().toLowerCase() === target.toLowerCase());
+                                    if (!matches.length) {
+                                        await reply(sock, msg, `I couldn't find a group called "${target}". Check !special listgroups.`);
+                                    } else if (matches.length > 1) {
+                                        await reply(sock, msg, `More than one group is called "${target}", so use the group id instead. You can get it from !special listgroups.`);
+                                    } else {
+                                        const sender = msg.pushName || String(senderJid || "").split("@")[0].split(":")[0] || "someone";
+                                        await sock.sendMessage(matches[0].id, { text: `${body}\n\nfrom ${sender}` });
+                                        await reply(sock, msg, `Sent to ${matches[0].subject}.`);
+                                    }
+                                } catch (error) {
+                                    log.error("group", "Error sending a special message:", error);
+                                    await reply(sock, msg, "That didn't work. Make sure the bot is in that group.");
+                                }
+                            }
                         } else if (subcommand === "kickfrom") {
                             // one time thing, kicks a number out of a group the bot is in. get the group id from !special listgroups
                             const groupId = args[2] || "";
@@ -3694,7 +3857,7 @@ Toxicity score: ${result.score}`
                             await reply(
                                 sock,
                                 msg,
-                                "Unknown special subcommand. Available: join, leave, listgroups, debug, delete, forceban, kickfrom, tag"
+                                "Unknown special subcommand. Available: join, leave, listgroups, debug, delete, forceban, kickfrom, sendmessage, tag"
                             );
                         }
                     }
