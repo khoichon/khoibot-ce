@@ -140,6 +140,21 @@ function calculateEquation(expression) {
             return result;
         }
 
+        function multiFactorial(n, step) {
+            const name = step === 2 ? "Double" : "Triple";
+            if (!Number.isInteger(n) || n < 1 - step) {
+                throw new Error(`${name} factorial only works on whole numbers that are ${1 - step} or more`);
+            }
+            let result = 1;
+            for (let i = n; i > 1; i -= step) {
+                result *= i;
+                if (!Number.isFinite(result)) {
+                    throw new Error(`That ${name.toLowerCase()} factorial is too big`);
+                }
+            }
+            return result;
+        }
+
         const one = (run) => ({ min: 1, max: 1, run: (args) => run(args[0]) });
 
         const functions = {
@@ -183,6 +198,8 @@ function calculateEquation(expression) {
             trunc: one(Math.trunc),
             sign: one(Math.sign),
             fact: one(factorial),
+            dfact: one((n) => multiFactorial(n, 2)),
+            tfact: one((n) => multiFactorial(n, 3)),
             round: {
                 min: 1,
                 max: 2,
@@ -344,7 +361,11 @@ function calculateEquation(expression) {
 
             while (true) {
                 if (consume("!")) {
-                    value = factorial(value);
+                    let step = 1;
+                    while (step < 3 && consume("!")) {
+                        step++;
+                    }
+                    value = step === 1 ? factorial(value) : multiFactorial(value, step);
                 } else if (peek() === "%" && !startsOperand(expression[position + 1])) {
                     position++;
                     value = value / 100;

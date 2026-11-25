@@ -39,6 +39,8 @@ const CATEGORIES = [
             { name: "crossword", level: "all" },
             { name: "pass", level: "all" },
             { name: "tournament", level: "all" },
+            { name: "hangman", level: "all" },
+            { name: "trivia", level: "all" },
         ],
     },
     {
@@ -47,6 +49,7 @@ const CATEGORIES = [
         commands: [
             { name: "translate", level: "all" },
             { name: "tts", level: "all" },
+            { name: "ttscss", level: "all" },
             { name: "edit", level: "all" },
             { name: "coin", level: "all" },
             { name: "roll", level: "all" },
@@ -62,6 +65,10 @@ const CATEGORIES = [
             { name: "define", level: "all" },
             { name: "wiki", level: "all" },
             { name: "weather", level: "all" },
+            { name: "toimage", level: "all" },
+            { name: "togif", level: "all" },
+            { name: "tomp3", level: "all" },
+            { name: "removebg", level: "all" },
             { name: "plane", level: "all" },
             { name: "plot", level: "all" },
             { name: "pfp", level: "all" },
@@ -73,6 +80,37 @@ const CATEGORIES = [
             { name: "drunkify", level: "all" },
             { name: "sticker", level: "all" },
             { name: "animsticker", level: "all" },
+            { name: "image", level: "all" },
+            { name: "pokemon", level: "all" },
+            { name: "qr", level: "all" },
+            { name: "flight", level: "all" },
+            { name: "song", level: "all" },
+        ],
+    },
+    {
+        name: "web",
+        level: "all",
+        commands: [
+            { name: "websearch", level: "all" },
+            { name: "news", level: "all" },
+            { name: "youtube", level: "all" },
+            { name: "reddit", level: "all" },
+            { name: "hn", level: "all" },
+            { name: "gif", level: "all" },
+            { name: "read", level: "all" },
+            { name: "tldr", level: "all" },
+            { name: "expand", level: "all" },
+            { name: "redirects", level: "all" },
+            { name: "screenshot", level: "all" },
+            { name: "archive", level: "all" },
+            { name: "isup", level: "all" },
+            { name: "pinghost", level: "all" },
+            { name: "dns", level: "all" },
+            { name: "whois", level: "all" },
+            { name: "ip", level: "all" },
+            { name: "github", level: "all" },
+            { name: "ytinfo", level: "all" },
+            { name: "video", level: "all" },
         ],
     },
     {
@@ -80,6 +118,7 @@ const CATEGORIES = [
         level: "admin",
         commands: [
             { name: "warn", level: "admin" },
+            { name: "slowmode", level: "admin" },
             { name: "warnings", level: "admin" },
             { name: "unwarn", level: "admin" },
             { name: "ban", level: "admin" },
@@ -89,6 +128,7 @@ const CATEGORIES = [
             { name: "automute", level: "admin" },
             { name: "autounmute", level: "admin" },
             { name: "execute", level: "admin" },
+            { name: "deletemessages", level: "admin" },
             { name: "tag", level: "admin" },
             { name: "mod", level: "admin" },
         ],
@@ -98,6 +138,7 @@ const CATEGORIES = [
         level: "trusted",
         commands: [
             { name: "special", level: "trusted" },
+            { name: "blacklist", level: "trusted" },
             { name: "antiban", level: "trusted" },
             { name: "messagedelay", level: "trusted" },
             { name: "messagecooldown", level: "trusted" },
@@ -110,8 +151,8 @@ const CATEGORIES = [
 // buildHelp adds whatever prefix the bot is using. a command with no entry here just says which category it's in
 const DETAILS = {
     ai: {
-        about: "Chats with the AI. It follows the group's conversation, and can also draw pictures and write short stories.",
-        usage: ["ai <prompt>", "ai imagine <description>", "ai story <idea>", "ai personality preset <name>"],
+        about: "Chats with the AI. It follows the group's conversation, and can also draw pictures and write short stories. If web search is on for the bot, the start of your question may be sent to its search server.",
+        usage: ["ai <prompt>", "ai witt (reply to a picture)", "ai <prompt> -voice [uk, es, fr, ja...]", "ai imagine <description>", "ai story <idea>", "ai personality preset <name>"],
     },
     summarise: {
         about: "Summarises some text, a message you reply to, or the last few messages in the group.",
@@ -193,6 +234,10 @@ const DETAILS = {
         about: "Draws text on a sticker. Run it on its own to see the fonts and options.",
         usage: ["tts [font] <text>", "tts (as a reply to a message)"],
     },
+    ttscss: {
+        about: "Draws text on a sticker with your own css, so it can look however you want. Run it on its own for an example. You can save a default style for yourself.",
+        usage: ["ttscss <text> | <css>", "ttscss <text> [-css <css>] [-bg <background>] [-clr <color>] [-size <number>]", "ttscss save <flags>", "ttscss reset", "ttscss show"]
+    },
     edit: {
         about: "Edits an image or sticker with crop, cut, draw and text. Run it on its own for the full help.",
         usage: ["edit grid", "edit"],
@@ -242,8 +287,8 @@ const DETAILS = {
         usage: ["animsticker", "animsticker add", "animsticker done"],
     },
     weather: {
-        about: "Shows the weather for a place.",
-        usage: ["weather <location>"],
+        about: "Shows the weather for a place. Add forecast 7 for the next 7 days, or forecast 24 for the next 24 hours.",
+        usage: ["weather <location>", "weather forecast 7 <location>", "weather forecast 24 <location>"],
     },
     plot: {
         about: "Plots a maths expression and sends the graph.",
@@ -258,7 +303,7 @@ const DETAILS = {
         usage: ["docs"],
     },
     credits: {
-        about: "Shows who gets the credit for the minesweeper and connect 4 games.",
+        about: "Shows who gets the credit for the minesweeper and connect 4 games, and for youtube.",
         usage: ["credits"],
     },
     up: {
@@ -293,9 +338,101 @@ const DETAILS = {
         about: "Looks up someone's profile picture.",
         usage: ["pfp <number>"],
     },
+    websearch: {
+        about: "Searches the web and sends the top results.",
+        usage: ["websearch <query>"],
+    },
+    news: {
+        about: "Searches the news and sends the top headlines. Leave it blank for world news.",
+        usage: ["news [topic]"],
+    },
+    youtube: {
+        about: "Finds YouTube videos and sends the links.",
+        usage: ["youtube <query>"],
+    },
+    reddit: {
+        about: "Searches Reddit and sends the top posts.",
+        usage: ["reddit <query>"],
+    },
+    hn: {
+        about: "Sends the Hacker News front page, or searches the stories if you give it something to look for.",
+        usage: ["hn [query]"],
+    },
+    gif: {
+        about: "Finds a gif and sends it. If the bot can't convert it, you get the link instead.",
+        usage: ["gif <query>"],
+    },
+    read: {
+        about: "Reads a web page and sends back the text from it.",
+        usage: ["read <link>"],
+    },
+    tldr: {
+        about: "Summarises a web page for you.",
+        usage: ["tldr <link>"],
+    },
+    expand: {
+        about: "Follows a short link and tells you where it goes.",
+        usage: ["expand <link>"],
+    },
+    redirects: {
+        about: "Shows every hop/transfers a link takes before it lands.",
+        usage: ["redirects <link>"],
+    },
+    screenshot: {
+        about: "Takes a screenshot of a web page and sends it.",
+        usage: ["screenshot <link>"],
+    },
+    archive: {
+        about: "Looks for the closest saved copy of a page on the Wayback Machine.",
+        usage: ["archive <link>"],
+    },
+    isup: {
+        about: "Checks if a site is up and how fast it answers.",
+        usage: ["isup <site>"],
+    },
+    pinghost: {
+        about: "Times a connection to a host on port 443, then 80.",
+        usage: ["pinghost <host>"],
+    },
+    dns: {
+        about: "Looks up the dns records for a domain. A is the default.",
+        usage: ["dns <domain> [A|AAAA|MX|NS|TXT|CNAME|SOA]"],
+    },
+    whois: {
+        about: "Looks up who registered a domain and when.",
+        usage: ["whois <domain>"],
+    },
+    ip: {
+        about: "Shows roughly where an ip address or a domain is and who runs it.",
+        usage: ["ip <address or domain>"],
+    },
+    github: {
+        about: "Shows a GitHub user or a repo.",
+        usage: ["github <user>", "github <user>/<repo>"],
+    },
+    image: {
+        about: "Searches for an image and sends it.",
+        usage: ["image <query>"],
+    },
+    pokemon: {
+        about: "Shows a pokemon, by name or number.",
+        usage: ["pokemon <name or number>"],
+    },
+    qr: {
+        about: "Makes a qr code from some text or a link.",
+        usage: ["qr <text or link>"],
+    },
+    flight: {
+        about: "Shows the usual route for a flight number, not the live status.",
+        usage: ["flight <flight number>"],
+    },
+    song: {
+        about: "Sends a song as an mp3 (15 minutes and 25 MB max). Give it some words and it sends the top youtube match, or a youtube link. A mod can turn it off with !mod downloadmedia.",
+        usage: ["song <youtube link or search>"],
+    },
     warn: {
         about: "Gives someone a warning.",
-        usage: ["warn <@user|number> [reason]"],
+        usage: ["warn <@user|number> <reason>"],
     },
     warnings: {
         about: "Lists the warnings in the group, or one person's.",
@@ -303,7 +440,7 @@ const DETAILS = {
     },
     unwarn: {
         about: "Takes a warning off someone. Add all to clear them.",
-        usage: ["unwarn <@user|number> [all]"],
+        usage: ["unwarn <@user|number> [all]", "unwarn <@user|number> warnnumber <number>"],
     },
     ban: {
         about: "Makes the bot ignore someone in this group, for a set time if you want.",
@@ -333,13 +470,21 @@ const DETAILS = {
         about: "Kicks someone out of the group.",
         usage: ["execute <@user|number>"],
     },
+    deletemessages: {
+        about: "Deletes the last few messages in the group, whoever sent them. The bot has to be an admin.",
+        usage: ["deletemessages <1-50>"],
+    },
     mod: {
         about: "Changes the settings for this group.",
         usage: ["mod <setting> <value>"],
     },
     special: {
         about: "Trusted extras, like adding someone to the group or force banning a number.",
-        usage: ["special addmember <number>", "special forceban <add|remove|list> [number]", "special resetaimodel [model]"],
+        usage: ["special addmember <number>", "special forceban <add|remove|list> [number]", "special sendmessage <group id|name> <message>", "special resetaimodel [model]"],
+    },
+    blacklist: {
+        about: "Trusted only. A blacklisted number gets removed as soon as they join a group the bot is admin in.",
+        usage: ["blacklist list", "blacklist add <number>", "blacklist remove <number>"],
     },
     antiban: {
         about: "Shows the anti-ban status and lets you change the rate limits.",
@@ -356,6 +501,42 @@ const DETAILS = {
     bot: {
         about: "Stops or resumes all sending from the bot.",
         usage: ["bot on", "bot off"],
+    },
+    ytinfo: {
+        about: "Shows the title, channel, length and views of a youtube link.",
+        usage: ["ytinfo <youtube link>"],
+    },
+    video: {
+        about: "Sends a youtube video as an mp4 (10 minutes and 40 MB max, 480p at most). Give it a link, or some words and it sends the top match. A mod can turn it off with !mod downloadmedia.",
+        usage: ["video <youtube link or search>"],
+    },
+    toimage: {
+        about: "Turns a sticker into a normal picture.",
+        usage: ["toimage (reply to a sticker)"],
+    },
+    togif: {
+        about: "Turns an animated sticker or a short video into a gif.",
+        usage: ["togif (reply to an animated sticker or video)"],
+    },
+    tomp3: {
+        about: "Pulls the sound out of a video or voice note as an mp3.",
+        usage: ["tomp3 (reply to a video or voice note)"],
+    },
+    removebg: {
+        about: "Cuts the background out of a picture. It comes back as a file so the background stays see through.",
+        usage: ["removebg (reply to a picture)"],
+    },
+    slowmode: {
+        about: "Makes people wait a bit between messages in this group.",
+        usage: ["slowmode <seconds>", "slowmode off", "slowmode"],
+    },
+    hangman: {
+        about: "Guess the word one letter at a time. Six wrong guesses and you lose.",
+        usage: ["hangman", "hangman cancel"],
+    },
+    trivia: {
+        about: "A multiple choice question. Answer with A to D, a wrong answer puts you out.",
+        usage: ["trivia"],
     },
 };
 

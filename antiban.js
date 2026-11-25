@@ -45,8 +45,8 @@ const MAX_QUEUE_WAIT_MS = 120 * 1000;
 
 // Commands that call outside services or use a lot of CPU.
 const HEAVY_COMMANDS = new Set([
-    "!tts", "!sticker", "!animsticker", "!edit", "!translate", "!wiki", "!define", "!fact", "!joke",
-    "!summarise", "!plane", "!weather", "!scp", "!roast", "!compliment"
+    "!song", "!video", "!togif", "!tomp3", "!removebg", "!tts", "!ttscss", "!sticker", "!animsticker", "!edit", "!translate", "!wiki", "!define", "!fact", "!joke",
+    "!summarise", "!plane", "!weather", "!scp", "!roast", "!compliment", "!websearch", "!read", "!tldr", "!screenshot", "!gif", "!image"
 ]);
 
 // Commands with their own cooldown (seconds), changed with

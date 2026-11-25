@@ -2,6 +2,7 @@
 // a level and a tag. Otherwise log.* prints exactly what console.* would.
 
 const util = require("node:util");
+const { rememberKey } = require("./utils.js");
 
 const MAX_MESSAGE_LENGTH = 500;
 const STACK_LINES = 3;
@@ -156,6 +157,38 @@ function tidyMentions(text, msg) {
 function withName(label, msg) {
     return msg.pushName && optionEnabled("ENABLE_SHOW_NAME") ? `${label} (${msg.pushName})` : label;
 }
+function mediaLabel(message) {
+    let inner = message;
+    for (let depth = 0; depth < 3 && inner; depth++) {
+        const next = inner.ephemeralMessage?.message
+            || inner.viewOnceMessage?.message
+            || inner.viewOnceMessageV2?.message
+            || inner.documentWithCaptionMessage?.message;
+        if (!next) {
+            break;
+        }
+        inner = next;
+    }
+    if (!inner) {
+        return null;
+    }
+    if (inner.stickerMessage) {
+        return inner.stickerMessage.isAnimated ? "[animated sticker]" : "[sticker]";
+    }
+    if (inner.imageMessage) {
+        return "[image]";
+    }
+    if (inner.videoMessage) {
+        return inner.videoMessage.gifPlayback ? "[gif]" : "[video]";
+    }
+    if (inner.audioMessage) {
+        return inner.audioMessage.ptt ? "[voice message]" : "[audio]";
+    }
+    if (inner.documentMessage) {
+        return "[file]";
+    }
+    return null;
+}
 
 // The line for an incoming message.
 function summarizeMessage({ msg, text, color = false }) {
@@ -297,6 +330,9 @@ function watchReplies(sock) {
 
     sock.sendMessage = async (jid, content, options) => {
         const sent = await original(jid, content, options);
+        if (!content?.delete && !content?.react) {
+            rememberKey(jid, sent?.key);
+        }
         try {
             if (betterLoggingEnabled() && optionEnabled("ENABLE_SHOW_MESSAGE")) {
                 const line = formatReply(content);
@@ -321,6 +357,7 @@ module.exports = {
     betterLoggingEnabled,
     rememberGroupName,
     formatMessage,
+    mediaLabel,
     summarizeMessage,
     describeSender,
     describeGroup,

@@ -1,6 +1,3 @@
-const { getGroupSetting } = require("./config.js");
-const { drunkify } = require("./drunk.js");
-
 function getText(message) {
     return (
         message?.conversation ??
@@ -10,13 +7,7 @@ function getText(message) {
 }
 
 function reply(sock, msg, text) {
-    const chatId = msg.key.remoteJid;
-    const drunk = chatId.endsWith("@g.us") && getGroupSetting(chatId, "drunkmode");
-    return sock.sendMessage(
-        chatId,
-        { text: drunk ? drunkify(text) : text },
-        { quoted: msg }
-    );
+    return sock.sendMessage(msg.key.remoteJid, { text }, { quoted: msg });
 }
 
 // same as reply, but the bot deletes its own message again after a few seconds, 0 means it stays forever :/
@@ -31,8 +22,33 @@ async function replyTemporary(sock, msg, text, seconds) {
     return sent;
 }
 
+const MAX_KEYS_KEPT = 250;
+const keysByChat = new Map();
+
+function rememberKey(chatId, key) {
+    if (!chatId || !key?.id) {
+        return;
+    }
+    const list = keysByChat.get(chatId) || [];
+    if (list.some(saved => saved.id === key.id)) {
+        return;
+    }
+    list.push({ remoteJid: key.remoteJid || chatId, fromMe: Boolean(key.fromMe), id: key.id, participant: key.participant });
+    if (list.length > MAX_KEYS_KEPT) {
+        list.shift();
+    }
+    keysByChat.set(chatId, list);
+}
+
+// the last count keys of a chat, oldest first
+function recentKeys(chatId, count) {
+    return (keysByChat.get(chatId) || []).slice(-count);
+}
+
 module.exports = {
     getText,
     reply,
-    replyTemporary
+    replyTemporary,
+    rememberKey,
+    recentKeys
 };

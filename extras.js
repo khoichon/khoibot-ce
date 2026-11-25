@@ -1,7 +1,7 @@
 // Extra commands, all behind ENABLE_EXTRA_COMMANDS=1 (off by default).
 //
-//   !fact  !joke  !define  !wiki  !translate  !quote  !tts  !sticker  !animsticker  !edit  !roast  !compliment
-//   !automute  !autounmute  !mute  !unmute  !ban  !unban  !execute  !add !warn !unwarn !warnings
+//   !fact  !joke  !define  !wiki  !translate  !quote  !tts  !ttscss  !sticker  !animsticker  !edit  !roast  !compliment
+//   !automute  !autounmute  !mute  !unmute  !ban  !unban  !execute  !add !warn !unwarn !warnings !deletemessages
 //
 // index.js calls init(sock) once per socket and handleCommand() for every
 // command, handleCommand() returns true when it used the message.
@@ -11,12 +11,13 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { downloadMediaMessage } = require("baileys");
 
-const { getText, reply } = require("./utils.js");
+const { getText, reply, recentKeys } = require("./utils.js");
 const { log } = require("./logging.js");
 const aitools = require("./aitools.js");
 const animation = require("./animation.js");
 const ttsFonts = require("./ttsfonts.js");
 const stickerEdit = require("./stickeredit.js");
+const ttscss = require("./ttscss.js");
 const { getGroupSetting, isTrusted, getTrusted } = require("./config.js");
 
 // schedules, bans and warnings are kept here instead of in the config doc, so the storage backends dont need to know about them.
@@ -45,7 +46,11 @@ let state = {
     // { chatId, ids, jid, times } for !warn, times is when each warning was given and jid is who got warned so the bot can tag them
     warns: [],
     // phone numbers added with !special forceban, the ones from FORCE_BANNED in .env arent kept here
-    forceBans: []
+    forceBans: [],
+    // phone numbers added with !blacklist, get removed as soon as they join a group
+    blacklist: [],
+    // each persons saved !ttscss style
+    ttscss: {}
 };
 
 function loadState() {
@@ -62,9 +67,16 @@ function loadState() {
                 );
             }
             if (Array.isArray(saved.forceBans)) { state.forceBans = [...new Set(saved.forceBans.map(cleanNumber).filter(Boolean))]; }
+            if (Array.isArray(saved.blacklist)) { state.blacklist = [...new Set(saved.blacklist.map(cleanNumber).filter(Boolean))]; }
+            if (saved.ttscss && typeof saved.ttscss === "object") {
+                for (const [user, style] of Object.entries(saved.ttscss)) {
+                    const clean = cleanTtscssStyle(style);
+                    if (clean) { state.ttscss[user] = clean; }
+                }
+            }
             if (Array.isArray(saved.mutes)) { state.mutes = saved.mutes.filter(entry => entry && typeof entry.chatId === "string" && typeof entry.until === "number"); }
             if (Array.isArray(saved.bans)) { state.bans = saved.bans.filter(ban => ban && typeof ban.chatId === "string" && Array.isArray(ban.ids) && (ban.until === null || typeof ban.until === "number")); }
-if (Array.isArray(saved.warns)) { state.warns = saved.warns.filter(entry => entry && typeof entry.chatId === "string" && typeof entry.jid === "string" && Array.isArray(entry.ids) && Array.isArray(entry.times)); }
+if (Array.isArray(saved.warns)) { state.warns = saved.warns.filter(entry => entry && typeof entry.chatId === "string" && typeof entry.jid === "string" && Array.isArray(entry.ids) && Array.isArray(entry.times) && entry.chatId !== "*"); }
         }
     } catch (error) {
         if (error.code !== "ENOENT") {
@@ -365,16 +377,39 @@ async function handleTranslate(sock, msg, { text, commandPrefix }) {
 
     const code = LANG_ALIASES[language.toLowerCase()] || language.toLowerCase();
     try {
-        // one quick try, google blocking us wont fix itself in a second so no retry here
-        const data = await fetchJson(
+        const data = await fetchJsonWithRetry(
             `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(code)}&dt=t&q=${encodeURIComponent(toTranslate)}`,
             5000
         );
-        await reply(sock, msg, data[0].map(part => part[0]).join(""));
-        return;
-    } catch {
-        // google blocks the pi a lot, so the local ai takes over from here
+        const translated = data[0].map(part => part[0]).join("");
+        if (translated.trim()) {
+            log.info("extras", "translate answered by google");
+            await reply(sock, msg, translated);
+            return;
+        }
+    } catch (error) {
+        log.warn("extras", `translate: google failed (${error.message}), trying mymemory`);
     }
+
+    if (Buffer.byteLength(toTranslate) <= 500) {
+        try {
+            const data = await fetchJson(
+                `https://api.mymemory.translated.net/get?q=${encodeURIComponent(toTranslate)}&langpair=Autodetect%7C${encodeURIComponent(code)}`,
+                6000
+            );
+            const translated = data?.responseData?.translatedText;
+            if (data?.responseStatus === 200 && !data.quotaFinished && translated) {
+                log.info("extras", "translate answered by mymemory");
+                await reply(sock, msg, translated);
+                return;
+            }
+            log.warn("extras", `translate: mymemory said no (status ${data?.responseStatus}), using the local ai`);
+        } catch (error) {
+            log.warn("extras", `translate: mymemory failed (${error.message}), using the local ai`);
+        }
+    }
+
+    log.info("extras", "translate falling back to the local ai");
 
     try {
         const translated = await aitools.translateText(toTranslate, language);
@@ -1219,6 +1254,164 @@ async function handleTts(sock, msg, { text, commandPrefix }) {
 
 
 // ============================================================
+// !ttscss <text> [-css "<css>"] [-bg <background>] [-clr <color>] [-size <number>]
+// ============================================================
+
+const TTSCSS_FLAG = /(?<!\S)-(css|bg|clr|size)\s+(?:"([^"]*)"|\u201c([^\u201d]*)\u201d|'([^']*)'|(\S+))/gi;
+
+function parseTtscss(raw) {
+    const flags = {};
+    const rest = raw.replace(TTSCSS_FLAG, (all, name, a, b, c, d) => {
+        flags[name.toLowerCase()] = (a ?? b ?? c ?? d).trim();
+        return " ";
+    });
+    return { flags, text: rest.replace(/\s+/g, " ").trim() };
+}
+
+function ttscssFlagProblem(flags) {
+    if (flags.size !== undefined && !/^\d+$/.test(flags.size)) {
+        return `"${flags.size}" is not a valid -size. Use a number like 90.`;
+    }
+    for (const name of ["css", "bg", "clr"]) {
+        const problem = flags[name] === undefined ? null : ttscss.cssProblem(flags[name]);
+        if (problem) {
+            return `Problem with -${name}: ${problem}`;
+        }
+    }
+    return null;
+}
+
+function ttscssStyleOf(flags) {
+    const style = {};
+    for (const name of ["css", "bg", "clr"]) {
+        if (flags[name]) { style[name] = flags[name]; }
+    }
+    if (flags.size) { style.size = Math.max(8, Math.min(300, Number(flags.size))); }
+    return Object.keys(style).length ? style : null;
+}
+
+function cleanTtscssStyle(style) {
+    if (!style || typeof style !== "object") {
+        return null;
+    }
+    const flags = {};
+    for (const name of ["css", "bg", "clr"]) {
+        if (typeof style[name] === "string") { flags[name] = style[name]; }
+    }
+    if (Number.isFinite(style.size)) { flags.size = String(Math.round(style.size)); }
+    return ttscssFlagProblem(flags) ? null : ttscssStyleOf(flags);
+}
+
+function describeTtscssStyle(style) {
+    // anything with a space in it goes in quotes, same as how it gets typed
+    const quoted = value => (/\s/.test(value) ? `"${value}"` : value);
+    return [
+        style.css && `-css ${quoted(style.css)}`,
+        style.bg && `-bg ${quoted(style.bg)}`,
+        style.clr && `-clr ${quoted(style.clr)}`,
+        style.size && `-size ${style.size}`
+    ].filter(Boolean).join(" ");
+}
+
+async function handleTtscss(sock, msg, { text, senderJid, commandPrefix }) {
+    const usage = [
+        `Usage: ${commandPrefix}ttscss <text> [-css "<css>"] [-bg <background>] [-clr <color>] [-size <number>]`,
+        `Alternatively, reply to a message with ${commandPrefix}ttscss.`,
+        `Example: ${commandPrefix}ttscss hello -clr gold -bg "linear-gradient(red, blue)" -css "text-shadow: 0 0 10px white; letter-spacing: 4px"`,
+        `You can also write the css after a | instead of using -css: ${commandPrefix}ttscss hello | color: gold; text-shadow: 0 0 10px white`,
+        "Put anything with spaces in quotes. -css takes normal css for the text, -bg is the background behind it (transparent works), -clr is the text color.",
+        `${commandPrefix}ttscss save <flags> keeps a default style for you, ${commandPrefix}ttscss reset clears it and ${commandPrefix}ttscss show tells you what it is.`
+    ].join("\n");
+
+    const user = senderJid || msg.key.participant || msg.key.remoteJid;
+    const parsed = parseTtscss(argsOf(text));
+    const flags = parsed.flags;
+    let typed = parsed.text;
+
+    const pipeAt = typed.indexOf("|");
+    if (pipeAt !== -1) {
+        const pipeCss = typed.slice(pipeAt + 1).trim();
+        typed = typed.slice(0, pipeAt).trim();
+        if (pipeCss) {
+            flags.css = flags.css ? `${flags.css}; ${pipeCss}` : pipeCss;
+        }
+    }
+    const word = typed.toLowerCase();
+
+    const problem = ttscssFlagProblem(flags);
+    if (problem) {
+        await reply(sock, msg, problem);
+        return;
+    }
+
+    if (word === "reset" || word === "show") {
+        const saved = state.ttscss[user];
+        if (word === "show") {
+            await reply(sock, msg, saved ? `Your default style is ${describeTtscssStyle(saved)}` : "You have no default style saved.");
+            return;
+        }
+        if (saved) {
+            delete state.ttscss[user];
+            saveState();
+        }
+        await reply(sock, msg, "Your default style is cleared.");
+        return;
+    }
+
+    if (word === "save") {
+        const style = ttscssStyleOf(flags);
+        if (!style) {
+            await reply(sock, msg, `Give at least one flag to save, for example ${commandPrefix}ttscss save -clr gold.`);
+            return;
+        }
+        state.ttscss[user] = style;
+        saveState();
+        await reply(sock, msg, `Saved your default style: ${describeTtscssStyle(style)}\nIt is used for every ${commandPrefix}ttscss sticker unless you specify a different one.`);
+        return;
+    }
+
+    let stickerText = typed || stripEmojis(quotedText(msg));
+    if (!stickerText) {
+        await reply(sock, msg, usage);
+        return;
+    }
+    if (stickerText.length > 300) {
+        await reply(sock, msg, "The text is too long for a sticker (300 characters maximum).");
+        return;
+    }
+
+    const saved = state.ttscss[user] || {};
+    const style = ttscssStyleOf(flags) || {};
+    const clr = style.clr || saved.clr;
+    const size = style.size || saved.size;
+    const css = [saved.css, clr && `color: ${clr}`, size && `font-size: ${size}px`, style.css].filter(Boolean).join("; ");
+
+    try {
+        const png = await ttscss.render({
+            text: stickerText,
+            css,
+            bg: style.bg || saved.bg || "",
+            sized: Boolean(size) || /(^|[;\s])font(-size)?\s*:/i.test(css)
+        });
+        const sticker = await toStickerBuffer(png);
+        await sock.sendMessage(msg.key.remoteJid, { sticker }, { quoted: msg });
+    } catch (error) {
+        if (error.code === "BUSY") {
+            await reply(sock, msg, "Another sticker is being made. Please try again in a moment.");
+            return;
+        }
+        if (error.code === "NOPLAYWRIGHT" || error.code === "NOBROWSER") {
+            log.error("extras", `ttscss is not set up: ${error.message}`);
+            await reply(sock, msg, `${commandPrefix}ttscss is not set up on this machine yet.`);
+            return;
+        }
+        log.error("extras", "ttscss error:", error);
+        await reply(sock, msg, "The sticker could not be created. Please check the css and try again.");
+    }
+}
+
+
+// ============================================================
 // !automute / !autounmute <once|all> <HH:MM>
 // Mutes or unmutes a group on a schedule. "Mute" means only admins can send
 // messages (the bot has to be a group admin to change that).
@@ -1587,6 +1780,38 @@ function isForceBanned(jids) {
     });
 }
 
+function isBlacklisted(jids) {
+    if (!state.blacklist.length) return false;
+    return (jids || []).some(jid => {
+        const number = userPart(jid);
+        return number && state.blacklist.includes(number);
+    });
+}
+
+function blacklistCommand(args) {
+    const usage = "Usage: !blacklist <add|remove|list> [number]. The number needs the country code and digits only, for example 6512345678.";
+    const action = String(args[0] || "").toLowerCase();
+    if (action === "list") {
+        return state.blacklist.length
+            ? `Blacklisted numbers:\n${state.blacklist.join("\n")}`
+            : "Nobody is blacklisted.";
+    }
+    if (action !== "add" && action !== "remove") return usage;
+    const number = cleanNumber(args.slice(1).join("").replace(/@/g, ""));
+    if (!number) return usage;
+    if (action === "add") {
+        if (state.blacklist.includes(number)) return `${number} is already blacklisted.`;
+        if ((getTrusted() || []).some(id => userPart(id) === number)) return "Trusted users can't be blacklisted.";
+        state.blacklist.push(number);
+        saveState();
+        return `Blacklisted ${number}. They get removed as soon as they join a group where the bot is admin.`;
+    }
+    if (!state.blacklist.includes(number)) return `${number} is not blacklisted.`;
+    state.blacklist = state.blacklist.filter(n => n !== number);
+    saveState();
+    return `Removed ${number} from the blacklist.`;
+}
+
 function forceBanCommand(args) {
     const usage = "Usage: !special forceban <add|remove|list> [number]. The number needs the country code and digits only, for example 6512345678.";
     const action = String(args[0] || "").toLowerCase();
@@ -1809,6 +2034,56 @@ async function handleExecute(sock, msg, { chatId, text, isGroup, trusted, groupA
         text: `BANG! @${userPart(member.id)} was executed.`,
         mentions: [member.id]
     });
+}
+
+
+const MAX_DELETE = 100;
+const DELETE_GAP_MS = 600;
+
+async function handleDeleteMessages(sock, msg, { chatId, text, isGroup, trusted, groupAdmin, commandPrefix }) {
+    if (!isGroup) {
+        await reply(sock, msg, "This command can only be used in a group.");
+        return;
+    }
+    if (!trusted && !groupAdmin) {
+        await reply(sock, msg, "Only group administrators and trusted users may use this command.");
+        return;
+    }
+
+    const count = Number(argsOf(text).split(/s+/)[0]);
+    if (!Number.isInteger(count) || count < 1 || count > MAX_DELETE) {
+        await reply(sock, msg, `Usage: ${commandPrefix}deletemessages <1-${MAX_DELETE}>`);
+        return;
+    }
+
+    const me = [sock.user?.id, sock.user?.lid].filter(Boolean).map(userPart);
+    const metadata = await sock.groupMetadata(chatId);
+    const botIsAdmin = metadata.participants.some(member => member.admin && [member.id, member.lid, member.phoneNumber, member.jid].some(x => x && me.includes(userPart(x))));
+    if (!botIsAdmin) {
+        await reply(sock, msg, "I need to be a group admin to delete messages.");
+        return;
+    }
+
+    const targets = recentKeys(chatId, count + 1).filter(key => key.id !== msg.key.id).slice(-count);
+    if (!targets.length) {
+        await reply(sock, msg, "I don't remember any messages to delete yet. I can only delete ones from after I last started.");
+        return;
+    }
+
+    let failed = 0;
+    for (const key of [...targets, msg.key]) {
+        try {
+            await sock.sendMessage(chatId, { delete: key });
+        } catch (error) {
+            failed++;
+            log.error("extras", "Could not delete a message:", error);
+        }
+        // slow and steady so whatsapp doesnt get annoyed
+        await sleep(DELETE_GAP_MS);
+    }
+    if (failed) {
+        await reply(sock, msg, `I couldn't delete ${failed} of them.`);
+    }
 }
 
 // !special addmember
@@ -2047,7 +2322,7 @@ async function handleWarn(sock, msg, ctx) {
 
     const { target, words } = pickTarget(msg, text);
     if (!target) {
-        await reply(sock, msg, `Say who to warn: ${commandPrefix}warn @user [count] [reason], or reply to them with ${commandPrefix}warn [count] [reason].`);
+        await reply(sock, msg, `Say who to warn: ${commandPrefix}warn @user [count] <reason>, or reply to them with ${commandPrefix}warn [count] <reason>.`);
         return;
     }
 
@@ -2060,6 +2335,12 @@ async function handleWarn(sock, msg, ctx) {
             await reply(sock, msg, `You can give 1 to ${limit} warnings at once.`);
             return;
         }
+    }
+
+    // warning needs reason
+    if (!words.join(" ").trim()) {
+        await reply(sock, msg, `Give a reason for the warning: ${commandPrefix}warn @user [count] <reason>.`);
+        return;
     }
 
     const member = await findMember(sock, chatId, target);
@@ -2172,7 +2453,7 @@ async function handleUnwarn(sock, msg, ctx) {
 
     const { target, words } = pickTarget(msg, text);
     if (!target) {
-        await reply(sock, msg, `Say who to remove a warning from: ${commandPrefix}unwarn @user [all], or reply to them with ${commandPrefix}unwarn [all].`);
+        await reply(sock, msg, `Say who to remove a warning from: ${commandPrefix}unwarn @user [all|warnnumber <number>], or reply to them with ${commandPrefix}unwarn [all|warnnumber <number>].`);
         return;
     }
 
@@ -2190,6 +2471,30 @@ async function handleUnwarn(sock, msg, ctx) {
     }
 
     const tag = `@${userPart(member.id)}`;
+    const numberAt = words.findIndex(word => word.toLowerCase() === "warnnumber");
+    if (numberAt !== -1) {
+        const number = Number(words[numberAt + 1]);
+        if (!Number.isInteger(number) || number < 1) {
+            await reply(sock, msg, `Give the warning number from ${commandPrefix}warnings @user, like ${commandPrefix}unwarn @user warnnumber 2.`);
+            return;
+        }
+        if (number > live.length) {
+            await reply(sock, msg, `They only have ${live.length} warning${live.length === 1 ? "" : "s"}, so there is no number ${number}.`);
+            return;
+        }
+
+        const removed = live[number - 1];
+        const reason = entry.reasons?.[removed] || "no reason given";
+        entry.times = live.filter(time => time !== removed);
+        cleanWarns();
+        saveState();
+        await sock.sendMessage(chatId, {
+            text: `Removed warning ${number} (${reason}) from ${tag}. They now have ${entry.times.length}/${getGroupSetting(chatId, "warnlimit")}.`,
+            mentions: [member.id]
+        });
+        return;
+    }
+
     const all = words.some(word => word.toLowerCase() === "all");
     entry.times = all ? [] : live.slice(0, -1);
     cleanWarns();
@@ -2370,6 +2675,7 @@ const COMMANDS = {
     "!quote": handleQuote,
     "!translate": handleTranslate,
     "!tts": handleTts,
+    "!ttscss": handleTtscss,
     "!sticker": handleSticker,
     "!animsticker": handleAnimSticker,
     "!edit": handleEdit,
@@ -2380,6 +2686,7 @@ const COMMANDS = {
     "!ban": handleBan,
     "!unban": handleBan,
     "!execute": handleExecute,
+    "!deletemessages": handleDeleteMessages,
     "!warn": handleWarn,
     "!unwarn": handleUnwarn,
     "!warnings": handleWarnings
@@ -2395,8 +2702,13 @@ async function handleCommand(sock, msg, ctx) {
         return false;
     }
 
+    // ttscss only exists when ENABLE_TTSCSS=1 is set
+    if (name === "!ttscss" && !ttscss.enabled()) {
+        return false;
+    }
+
     await COMMANDS[name](sock, msg, ctx);
     return true;
 }
 
-module.exports = { init, handleCommand, captionText, extraCommandsEnabled, isBanned, parseBanTime, describeDuration, curseDeleted, curseSettings, isForceBanned, forceBanCommand, addMember };
+module.exports = { init, handleCommand, captionText, extraCommandsEnabled, isBanned, parseBanTime, describeDuration, curseDeleted, curseSettings, isForceBanned, forceBanCommand, addMember, isBlacklisted, blacklistCommand };

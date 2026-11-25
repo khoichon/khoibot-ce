@@ -51,6 +51,8 @@ function defaultGroupSettings() {
         gamesenabled: true,
         // casino games (blackjack, slots) stay off until someone turns them on with !mod casinoenabled
         casinoenabled: false,
+        // !song and !video can be switched off per group with !mod downloadmedia
+        downloadmedia: true,
         // the help menu stays off in every chat until a mod turns it on with !mod enablehelpmenu
         enablehelpmenu: false,
         // when this is on only trusted people and group admins can use the bot, off until a mod turns it on
@@ -151,6 +153,8 @@ function normalizeGroupSettings(raw) {
         coerceBoolean(raw.gamesenabled ?? raw.gamesEnabled, true);
 
     settings.casinoenabled = coerceBoolean(raw.casinoenabled, false);
+
+    settings.downloadmedia = coerceBoolean(raw.downloadmedia, true);
 
     settings.enablehelpmenu = coerceBoolean(raw.enablehelpmenu, false);
 
