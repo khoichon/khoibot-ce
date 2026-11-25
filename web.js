@@ -103,7 +103,7 @@ function usage(sock, msg, ctx, text) {
 }
 
 async function search(query, options = {}) {
-    const { limit = MAX_RESULTS, categories, safesearch = 1, terms = query } = typeof options === "number" ? { limit: options } : options;
+    const { limit = MAX_RESULTS, categories, safesearch = 1, terms = query, snippetLength = SNIPPET_LENGTH } = typeof options === "number" ? { limit: options } : options;
 
     const url = new URL(`${searxngUrl()}/search`);
     url.searchParams.set("q", query);
@@ -130,7 +130,7 @@ async function search(query, options = {}) {
         .map(result => ({
             title: shorten(result.title, 100).replace(/\*/g, "") || result.url,
             url: result.url,
-            snippet: shorten(result.content, SNIPPET_LENGTH),
+            snippet: shorten(result.content, snippetLength),
             image: typeof result.img_src === "string" && /^https?:\/\//i.test(result.img_src) ? result.img_src : "",
             date: /^\d{4}-\d\d-\d\d/.test(result.publishedDate || "") ? result.publishedDate.slice(0, 10) : ""
         }));
