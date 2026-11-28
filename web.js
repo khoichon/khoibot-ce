@@ -12,6 +12,7 @@ const { promisify } = require("node:util");
 const { reply } = require("./utils.js");
 const { getGroupSetting } = require("./config.js");
 const { log } = require("./logging.js");
+const antiban = require("./antiban.js");
 
 const execFileAsync = promisify(execFile);
 
@@ -24,7 +25,7 @@ const MAX_PAGE_BYTES = 1500000;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_GIF_BYTES = 8 * 1024 * 1024;
 const MAX_REDIRECTS = 8;
-const READ_LENGTH = 1500;
+const READ_LENGTH = 4000;
 const TLDR_SOURCE_LENGTH = 12000;
 const MAX_REPLY_LENGTH = 3500;
 const SCREENSHOT_TIMEOUT_MS = 20000;
@@ -60,12 +61,12 @@ function checkLength(text) {
     }
 }
 
-function withTyping(handler) {
+function withTyping(handler, presence = "composing") {
     return async (sock, msg, ctx) => {
         const chatId = msg.key.remoteJid;
         const send = (state) => Promise.resolve().then(() => sock.sendPresenceUpdate(state, chatId)).catch(() => {});
-        send("composing");
-        const timer = setInterval(() => send("composing"), 8000);
+        send(presence);
+        const timer = setInterval(() => send(presence), 8000);
         try {
             return await handler(sock, msg, ctx);
         } finally {
@@ -1138,8 +1139,8 @@ async function handleWeather(sock, msg, ctx) {
 }
 
 const YOUTUBE_HOSTS = new Set(["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"]);
-const MAX_AUDIO_SECONDS = 15 * 60;
-const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+const MAX_AUDIO_SECONDS = 30 * 60;
+const MAX_AUDIO_BYTES = 50 * 1024 * 1024;
 const YTDLP_TIMEOUT_MS = 2 * 60 * 1000;
 
 async function youtubeTarget(input) {
@@ -1158,6 +1159,76 @@ async function youtubeTarget(input) {
         }
     }
     throw new UserError(`I could not find a video with "${shorten(input, 50)}" in it.`);
+}
+
+const PICK_COUNT = 5;
+const PICK_TTL_MS = 5 * 60 * 1000;
+const pending = new Map();
+
+async function searchYoutube(input) {
+    const stdout = await runYtdlp(["--flat-playlist", "--print", "%(id)s\t%(title)s\t%(channel,uploader)s\t%(duration)s", "--", `ytsearch${PICK_COUNT}:${input}`], { search: true });
+    return stdout.split("\n").map(line => {
+        const [id, title, channel, duration] = line.split("\t");
+        return { id, title, channel, duration: Number(duration) };
+    }).filter(video => /^[\w-]{11}$/.test(video.id));
+}
+
+let searching = 0;
+const MAX_SEARCHES = 4;
+const choosing = new Set();
+
+function pickKey(ctx) {
+    return `${ctx.chatId}:${ctx.senderJid}`;
+}
+
+async function chooseVideo(sock, msg, ctx, kind, input) {
+    const key = pickKey(ctx);
+    if (/^https?:\/\//i.test(input)) {
+        pending.delete(key);
+        return youtubeTarget(input);
+    }
+    if (ctx.senderJid === ctx.chatId && ctx.chatId.endsWith("@g.us")) {
+        throw new UserError("I cannot tell who you are in this chat, so please send a link instead.");
+    }
+    if (choosing.has(key)) {
+        throw new UserError("I am still working on your last search. Please wait a moment.");
+    }
+    if (busy[kind === "song" ? "audio" : "video"]) {
+        throw new UserError(`I am still downloading another ${kind}. Please wait a moment.`);
+    }
+    if (searching >= MAX_SEARCHES) {
+        throw new UserError("I am searching for other people right now. Please try again in a moment.");
+    }
+
+    choosing.add(key);
+    try {
+        searching++;
+        let videos;
+        try {
+            videos = await searchYoutube(input);
+        } finally {
+            searching--;
+        }
+        if (!videos.length) {
+            throw new UserError(`I could not find a video with "${shorten(input, 50)}" in it.`);
+        }
+
+        const lines = videos.map((video, index) => {
+            const length = video.duration > 0 ? ` (${clock(video.duration)})` : "";
+            return `${index + 1}. ${shorten(video.title, 70)} - ${shorten(video.channel, 30)}${length}`;
+        });
+        await reply(sock, msg, `*Results for ${shorten(input, 50)}*\n${lines.join("\n")}\n\nReply with a number from 1 to ${videos.length} to pick one, or cancel to cancel.`);
+
+        for (const [oldKey, old] of pending) {
+            if (old.expires <= Date.now()) {
+                pending.delete(oldKey);
+            }
+        }
+        pending.set(key, { kind, videos, expires: Date.now() + PICK_TTL_MS });
+    } finally {
+        choosing.delete(key);
+    }
+    return null;
 }
 
 async function runYtdlp(args, { search = false } = {}) {
@@ -1234,6 +1305,14 @@ async function handleDownloadVideo(sock, msg, ctx) {
         return usage(sock, msg, ctx, "video <youtube link or search>");
     }
     checkLength(input);
+    const target = await chooseVideo(sock, msg, ctx, "video", input);
+    if (!target) {
+        return;
+    }
+    return sendVideo(sock, msg, target);
+}
+
+async function sendVideo(sock, msg, target, onSent) {
     if (busy.video) {
         return reply(sock, msg, "I am still downloading another video. Please wait a moment.");
     }
@@ -1241,7 +1320,6 @@ async function handleDownloadVideo(sock, msg, ctx) {
     busy.video = true;
     let dir = "";
     try {
-        const target = await youtubeTarget(input);
         dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "khoibot-video-"));
         const stdout = await runYtdlp([
             "--match-filter", `duration<=${MAX_VIDEO_SECONDS}`,
@@ -1263,6 +1341,7 @@ async function handleDownloadVideo(sock, msg, ctx) {
         if (Number(seconds) > 0) lines.push(`Duration: ${clock(Number(seconds))}`);
         if (views && views !== "NA") lines.push(`Views: ${number(views)}`);
         await sock.sendMessage(msg.key.remoteJid, { video, mimetype: "video/mp4", caption: lines.join("\n") }, { quoted: msg });
+        onSent?.();
     } finally {
         busy.video = false;
         if (dir) await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => { });
@@ -1278,6 +1357,14 @@ async function handleSong(sock, msg, ctx) {
         return usage(sock, msg, ctx, "song <youtube link or search>");
     }
     checkLength(input);
+    const target = await chooseVideo(sock, msg, ctx, "song", input);
+    if (!target) {
+        return;
+    }
+    return sendSong(sock, msg, target);
+}
+
+async function sendSong(sock, msg, target, onSent) {
     if (busy.audio) {
         return reply(sock, msg, "I am still downloading another song. Please wait a moment.");
     }
@@ -1285,7 +1372,6 @@ async function handleSong(sock, msg, ctx) {
     busy.audio = true;
     let dir = "";
     try {
-        const target = await youtubeTarget(input);
         dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "khoibot-audio-"));
         const stdout = await runYtdlp([
             "--match-filter", `duration<=${MAX_AUDIO_SECONDS}`,
@@ -1298,11 +1384,12 @@ async function handleSong(sock, msg, ctx) {
 
         const file = (await fs.promises.readdir(dir)).find(name => name.endsWith(".mp3"));
         if (!file) {
-            throw new UserError("That video is too long or too big (15 minutes and 25 MB maximum).");
+            throw new UserError("That video is too long or too big (30 minutes and 50 MB maximum).");
         }
         const audio = await fs.promises.readFile(path.join(dir, file));
         const title = shorten(stdout.trim().split("\n").pop() || "", 100);
         await sock.sendMessage(msg.key.remoteJid, { audio, mimetype: "audio/mpeg" }, { quoted: msg });
+        onSent?.();
         if (title) {
             await reply(sock, msg, title);
         }
@@ -1337,9 +1424,67 @@ const COMMANDS = {
     "!flight": command(handleFlight),
     "!weather": command(handleWeather),
     "!ytinfo": command(handleYtinfo),
-    "!song": command(withTyping(handleSong), "I could not download that. Please try again later."),
+    "!song": command(withTyping(handleSong, "recording"), "I could not download that. Please try again later."),
     "!video": command(withTyping(handleDownloadVideo), "I could not download that. Please try again later.")
 };
+
+const PICKERS = {
+    song: command(withTyping((sock, msg, ctx) => sendSong(sock, msg, ctx.target, ctx.onSent), "recording"), "I could not download that. Please try again later."),
+    video: command(withTyping((sock, msg, ctx) => sendVideo(sock, msg, ctx.target, ctx.onSent)), "I could not download that. Please try again later.")
+};
+
+async function handlePick(sock, msg, ctx) {
+    if (!webEnabled()) {
+        return false;
+    }
+
+    const key = pickKey(ctx);
+    const saved = pending.get(key);
+    if (!saved) {
+        return false;
+    }
+    if (saved.expires <= Date.now()) {
+        pending.delete(key);
+        return false;
+    }
+
+    const answer = String(ctx.text || "").trim().toLowerCase();
+    if (answer === "cancel") {
+        pending.delete(key);
+        await reply(sock, msg, "Cancelled.");
+        return true;
+    }
+    if (!/^\d$/.test(answer)) {
+        return false;
+    }
+
+    const video = saved.videos[Number(answer) - 1];
+    if (!video) {
+        await reply(sock, msg, `Reply with a number from 1 to ${saved.videos.length}, or reply cancel.`);
+        return true;
+    }
+
+    if (antiban.commandsOff({ trusted: ctx.trusted })) {
+        return true;
+    }
+    if (saved.working) {
+        return true;
+    }
+    saved.working = true;
+    let sent = false;
+    try {
+        if (!await downloadsAllowed(sock, msg, ctx)) {
+            return true;
+        }
+        await PICKERS[saved.kind](sock, msg, { ...ctx, text: `!${saved.kind} ${answer}`, target: `https://www.youtube.com/watch?v=${video.id}`, onSent: () => { sent = true; } });
+    } finally {
+        saved.working = false;
+        if (sent && pending.get(key) === saved) {
+            pending.delete(key);
+        }
+    }
+    return true;
+}
 
 async function handleCommand(sock, msg, ctx) {
     if (!webEnabled()) {
@@ -1354,4 +1499,4 @@ async function handleCommand(sock, msg, ctx) {
     return (await COMMANDS[name](sock, msg, ctx)) !== false;
 }
 
-module.exports = { handleCommand, search, fetchPage, webEnabled };
+module.exports = { handleCommand, handlePick, search, fetchPage, webEnabled };

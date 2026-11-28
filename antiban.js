@@ -45,7 +45,7 @@ const MAX_QUEUE_WAIT_MS = 120 * 1000;
 
 // Commands that call outside services or use a lot of CPU.
 const HEAVY_COMMANDS = new Set([
-    "!song", "!video", "!togif", "!tomp3", "!removebg", "!tts", "!ttscss", "!sticker", "!animsticker", "!edit", "!translate", "!wiki", "!define", "!fact", "!joke",
+    "!song", "!video", "!togif", "!tomp3", "!removebg", "!tts", "!ttsticker", "!ttscss", "!sticker", "!animsticker", "!edit", "!translate", "!wiki", "!define", "!fact", "!joke",
     "!summarise", "!plane", "!weather", "!scp", "!roast", "!compliment", "!websearch", "!read", "!tldr", "!screenshot", "!gif", "!image"
 ]);
 
@@ -56,6 +56,10 @@ const COMMAND_COOLDOWN_DEFAULTS = { "!plot": 20, "!pfp": 30, "!whoami": 10, "!an
 // !slots and !blackjack share the one "!casino" cooldown, so doing a a game after one another dosent do anything, it just ignores the commandd
 // the casino cooldown is changed with !antiban casinocooldown <seconds> instead
 const CASINO_COMMANDS = new Set(["!slots", "!blackjack"]);
+
+function presenceFor(content) {
+    return content && content.audio && content.ptt ? "recording" : "composing";
+}
 
 function cooldownKey(name) {
     return CASINO_COMMANDS.has(name) ? "!casino" : name;
@@ -499,7 +503,7 @@ function installSendGuard(sock) {
 
         if (waitMs > 0) {
             try {
-                await sock.sendPresenceUpdate("composing", jid);
+                await sock.sendPresenceUpdate(presenceFor(item.content), jid);
             } catch {
                 // presence is optional
             }
@@ -589,7 +593,7 @@ function installSendGuard(sock) {
         const run = previous.then(async () => {
             if (waitMs > 0) {
                 try {
-                    await sock.sendPresenceUpdate("composing", jid);
+                    await sock.sendPresenceUpdate(presenceFor(content), jid);
                 } catch {
                     // presence is optional
                 }
@@ -813,6 +817,10 @@ function shouldIgnoreCommand({ text, trusted, senderJid }) {
     }
 
     return false;
+}
+
+function commandsOff({ trusted }) {
+    return antibanEnabled() && !trusted && state.off;
 }
 
 // Returns a message if the !plot input is too big, otherwise null.
@@ -1155,6 +1163,7 @@ module.exports = {
     handleCommand,
     isStale,
     shouldIgnoreCommand,
+    commandsOff,
     plotInputProblem,
     reconnectDelay,
     connectionOpened,

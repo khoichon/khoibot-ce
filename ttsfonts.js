@@ -1,4 +1,4 @@
-// Draws the text of !tts from the font files themselves, using fontkit.
+// Draws the text of !ttsticker from the font files themselves, using fontkit.
 // This is what lets a variable font's axes be set (for example MORF on
 // Kablammo). If fontkit is not installed, or a font file cannot be found,
 // available() or load() say so and extras.js draws normal SVG text instead.

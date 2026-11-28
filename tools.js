@@ -63,15 +63,28 @@ function repliedMedia(msg) {
 }
 
 async function download(sock, media) {
-    if (Number(media.info.fileLength) > MAX_INPUT_BYTES) {
+    const length = media.info.fileLength;
+    const declared = typeof length?.toNumber === "function" ? length.toNumber() : Number(length);
+    if (declared > MAX_INPUT_BYTES) {
         throw new UserError("That file is too big (20 MB maximum).");
     }
-    return downloadMediaMessage(
+    const stream = await downloadMediaMessage(
         media.wrapped,
-        "buffer",
+        "stream",
         {},
         { logger: silentLogger, reuploadRequest: sock.updateMediaMessage }
     );
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of stream) {
+        total += chunk.length;
+        if (total > MAX_INPUT_BYTES) {
+            stream.destroy();
+            throw new UserError("That file is too big (20 MB maximum).");
+        }
+        chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
 }
 
 async function withTempDir(job) {
@@ -153,7 +166,7 @@ async function handleToGif(sock, msg, ctx) {
                 "-i", input,
                 "-t", String(MAX_GIF_SECONDS),
                 "-an",
-                "-vf", "scale='min(480,iw)':-2",
+                "-vf", "scale='trunc(min(480,iw)/2)*2':-2",
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart",

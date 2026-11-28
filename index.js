@@ -83,9 +83,9 @@ const commandPrefix = devMode ? "t!" : "!";
 
 // the antibadword only skips real commands. if it skipped everything that starts with ! anyone could put a ! in front of a bad word
 const KNOWN_COMMANDS = new Set([
-    "archive", "deletemessages", "dns", "expand", "flight", "gif", "github", "hn", "image", "ip", "isup", "news", "pinghost", "pokemon", "qr", "read", "reddit", "redirects", "screenshot", "song", "tldr", "youtube",
+    "archive", "delete", "dns", "expand", "flight", "gif", "github", "hn", "image", "ip", "isup", "news", "pinghost", "pokemon", "qr", "read", "reddit", "redirects", "screenshot", "song", "tldr", "youtube",
     "video", "ytinfo", "ttscss", "hangman", "removebg", "slowmode", "togif", "toimage", "tomp3", "trivia",
-    "ai", "anagram", "animsticker", "antiban", "automute", "autounmute", "ban", "blackjack", "blacklist", "bot", "cat", "chess", "coin", "compliment", "connect4", "credits", "crossword", "decrypt", "define", "docs", "dog", "down", "drunkify", "edit", "execute", "fact", "help", "hotpotato", "joke", "math", "meme", "menu", "messagecooldown", "messagedelay", "minesweeper", "mod", "mute", "numguess", "pass", "pfp", "plane", "plot", "quote", "roast", "roll", "rps", "scp", "slots", "special", "sticker", "summarise", "tag", "tournament", "translate", "tts", "ttt", "unban", "unmute", "unwarn", "up", "warn", "warnings", "weather", "websearch", "whoami", "wiki", "wordchain", "wordle"
+    "ai", "anagram", "animsticker", "antiban", "automute", "autounmute", "ban", "blackjack", "blacklist", "bot", "cat", "chess", "coin", "compliment", "connect4", "credits", "crossword", "decrypt", "define", "docs", "dog", "down", "drunkify", "edit", "execute", "fact", "help", "hotpotato", "joke", "math", "meme", "menu", "messagecooldown", "messagedelay", "minesweeper", "mod", "modlog", "mute", "mutechat", "numguess", "pass", "pfp", "plane", "plot", "quote", "roast", "roll", "rps", "scp", "slots", "special", "sticker", "summarise", "tag", "tournament", "translate", "tts", "ttsticker", "ttt", "unban", "unmute", "unmutechat", "unwarn", "up", "warn", "weather", "websearch", "whoami", "wiki", "wordchain", "wordle"
 ]);
 
 const WORDLE_SUBCOMMANDS = new Set(["", "cancel", "hint"]);
@@ -861,6 +861,18 @@ const startSock = async () => {
                 }
             }
 
+            if (
+                !receivedText &&
+                msg.key.remoteJid.endsWith("@g.us") &&
+                isGroupEnabled(msg.key.remoteJid) &&
+                extras.isUserMuted(msg.key.remoteJid, [msg.key.participant, msg.key.participantAlt, msg.key.remoteJidAlt]) &&
+                ![msg.key.participant, msg.key.participantAlt, msg.key.remoteJidAlt, msg.key.remoteJid].some(id => isTrusted(id)) &&
+                !(await isGroupAdmin(sock, msg)) &&
+                await isBotAdmin(msg.key.remoteJid)
+            ) {
+                await sock.sendMessage(msg.key.remoteJid, { delete: msg.key });
+            }
+
             const mediaTag = logging.mediaLabel(msg.message);
 
             if (!receivedText) {
@@ -977,7 +989,18 @@ const startSock = async () => {
                     // force banned numbers are banned everywhere, even in dms
                     const banned = !trusted && ((isGroup && extras.isBanned(chatId, [senderPN, senderLID, senderRemoteAlt])) || extras.isForceBanned([senderPN, senderLID, senderRemoteAlt]));
 
+                    if (isGroup && !trusted && !groupAdmin && extras.isUserMuted(chatId, [senderPN, senderLID, senderRemoteAlt])) {
+                        if (await isBotAdmin(chatId)) {
+                            await sock.sendMessage(msg.key.remoteJid, { delete: msg.key });
+                        }
+                        continue;
+                    }
+
                     if (!banned && await games.handleAnswer(sock, msg, { chatId, senderJid, text })) {
+                        continue;
+                    }
+
+                    if (!banned && await web.handlePick(sock, msg, { chatId, senderJid, text, isGroup, trusted, groupAdmin, commandPrefix })) {
                         continue;
                     }
 
@@ -1346,6 +1369,10 @@ Toxicity score: ${result.score}`
                             const isChat = (firstWord || ownPicture) && firstWord !== "personality" && firstWord !== "reset";
                             const voiceFlag = isChat ? aitools.takeVoiceFlag(text.slice("!ai".length)) : null;
                             const aiPrompt = voiceFlag ? voiceFlag.prompt : text.slice("!ai".length);
+                            if (voiceFlag?.problem) {
+                                await reply(sock, msg, voiceFlag.problem);
+                                continue;
+                            }
                             if (voiceFlag?.empty && !ownPicture) {
                                 await reply(sock, msg, "Tell me what to say, like !ai how are you -voice es");
                                 continue;
@@ -1354,9 +1381,10 @@ Toxicity score: ${result.score}`
                             // so we keep poking it until the answer is ready.
                             const sendPresence = (state) => Promise.resolve().then(() => sock.sendPresenceUpdate(state, msg.key.remoteJid)).catch(() => {});
                             let typingTimer = null;
+                            const typingState = voiceFlag ? "recording" : "composing";
                             if (isChat) {
-                                sendPresence("composing");
-                                typingTimer = setInterval(() => sendPresence("composing"), 8000);
+                                sendPresence(typingState);
+                                typingTimer = setInterval(() => sendPresence(typingState), 8000);
                             }
                             let answer;
                             try {
@@ -1374,7 +1402,7 @@ Toxicity score: ${result.score}`
                             }
                             if (voiceFlag) {
                                 try {
-                                    const audio = await aitools.voiceNote(answer, voiceFlag.accent);
+                                    const audio = await aitools.voiceNote(answer, voiceFlag.accent, "ai", { local: voiceFlag.local });
                                     if (audio) {
                                         await sock.sendMessage(msg.key.remoteJid, { audio, mimetype: "audio/ogg; codecs=opus", ptt: true }, { quoted: msg });
                                         continue;
@@ -1486,7 +1514,7 @@ Toxicity score: ${result.score}`
                         await reply(
                             sock,
                             msg,
-                            "Minesweeper and Connect 4 credit goes to ASHBot, and the !youtube credit goes to RuBot."
+                            "Minesweeper and Connect 4 credit goes to ASHBot, the !youtube credit goes to RuBot, and picking songs and videos by number, the voice notes for !tts and using Fish Audio credit goes to wx bot."
                         );
                     }
 
@@ -2359,7 +2387,7 @@ Toxicity score: ${result.score}`
                                     `  warntoggle: ${getGroupSetting(chatId, "warntoggle")}  (true|false)`,
                                     `  warntrusted: ${getGroupSetting(chatId, "warntrusted")}  (true|false)`,
                                     `  warnlimit: ${getGroupSetting(chatId, "warnlimit")}  (1-20)`,
-                                    `  warnaction: ${getGroupSetting(chatId, "warnaction").join(" ")}  (kick, ban [duration] and notify, in any mix)`,
+                                    `  warnaction: ${getGroupSetting(chatId, "warnaction").join(" ")}  (kick, ban [duration], mute [duration] and notify, in any mix, but not mute with kick)`,
                                     `  warnexpiry: ${getGroupSetting(chatId, "warnexpiry")}  (days, 0 for never)`,
                                     `  warncurses: ${extras.curseSettings(chatId).limit}  (0-50, 0 for off)`,
                                     `  warncursestime: ${extras.curseSettings(chatId).minutes}  (minutes, 1-60)`,
@@ -2645,7 +2673,7 @@ Toxicity score: ${result.score}`
                                 await reply(sock, msg, "Usage: !mod enablehelpmenu <true|false>");
                                 continue;
                             }
-                            if (value === "true" && Math.random() >= 0.2) {
+                            if (value === "true" && Math.random() >= 0.001) {
                                 await reply(sock, msg, getMessage("refusemodhelp"));
                                 continue;
                             }
@@ -2921,8 +2949,8 @@ Toxicity score: ${result.score}`
                         }
 
                         // ----------------------------
-                        // !mod warnaction <kick|ban|notify> [duration]
-                        // what the bot does when someone hits the warn limit. kick, ban and notify can all be used together. a ban can have a time on it, 0 or no time means it never ends
+                        // !mod warnaction <kick|ban|mute|notify> [duration]
+                        // what the bot does when someone hits the warn limit. kick, ban, mute and notify can be used together, except mute and kick. a ban or a mute can have a time on it, 0 or no time means it never ends
                         // ----------------------------
 
                         if (setting.toLowerCase() === "warnaction") {
@@ -2931,16 +2959,16 @@ Toxicity score: ${result.score}`
                                 const current = getGroupSetting(chatId, "warnaction");
                                 const length = getGroupSetting(chatId, "warnbanduration");
                                 const lasts = length ? `for ${extras.describeDuration(length)}` : "with no end";
-                                await reply(sock, msg, `warnaction is currently ${current.join(" ")}${current.includes("ban") ? ` (the ban lasts ${lasts})` : ""}`);
+                                await reply(sock, msg, `warnaction is currently ${current.join(" ")}${current.includes("ban") ? ` (the ban lasts ${lasts})` : ""}${current.includes("mute") ? ` (the mute lasts ${lasts})` : ""}`);
                                 continue;
                             }
 
-                            const usage = "Usage: !mod warnaction <kick|ban|notify> [duration]\nkick, ban and notify can be used together, for example !mod warnaction kick ban 2h. A duration is something like 2h, 90min or 1h30min (1 minute to 30 days) and only goes with ban. Use 0 or leave it out for a ban with no end.";
+                            const usage = "Usage: !mod warnaction <kick|ban|mute|notify> [duration]\nkick, ban, mute and notify can be used together, for example !mod warnaction kick ban 2h, but mute can't go with kick. A duration is something like 2h, 90min or 1h30min (1 minute to 30 days) and only goes with ban or mute. Use 0 or leave it out for one with no end.";
 
                             // the actions come first, whatever is left over is the ban time
                             const picked = [];
                             let rest = args.slice(2);
-                            while (rest.length && ["kick", "ban", "notify"].includes(rest[0].toLowerCase())) {
+                            while (rest.length && ["kick", "ban", "mute", "notify"].includes(rest[0].toLowerCase())) {
                                 const word = rest[0].toLowerCase();
                                 if (!picked.includes(word)) {
                                     picked.push(word);
@@ -2953,10 +2981,15 @@ Toxicity score: ${result.score}`
                                 continue;
                             }
 
-                            // only a ban takes a time, 0 means it never ends
+                            if (picked.includes("mute") && picked.includes("kick")) {
+                                await reply(sock, msg, "mute can't be used with kick, a kicked person has no messages left to delete.");
+                                continue;
+                            }
+
+                            // only a ban or a mute takes a time, 0 means it never ends
                             let duration = 0;
                             if (rest.length) {
-                                duration = picked.includes("ban") ? extras.parseBanTime(rest.join("")) : null;
+                                duration = picked.includes("ban") || picked.includes("mute") ? extras.parseBanTime(rest.join("")) : null;
                                 if (duration === null) {
                                     await reply(sock, msg, usage);
                                     continue;
@@ -2964,7 +2997,7 @@ Toxicity score: ${result.score}`
                             }
 
                             setGroupSetting(chatId, "warnaction", picked);
-                            if (picked.includes("ban")) {
+                            if (picked.includes("ban") || picked.includes("mute")) {
                                 setGroupSetting(chatId, "warnbanduration", duration);
                             }
 
@@ -2974,6 +3007,9 @@ Toxicity score: ${result.score}`
                             }
                             if (picked.includes("ban")) {
                                 effects.push(duration ? `are banned from using the bot for ${extras.describeDuration(duration)}` : "are banned from using the bot until someone unbans them");
+                            }
+                            if (picked.includes("mute")) {
+                                effects.push(duration ? `have their messages deleted for ${extras.describeDuration(duration)}` : "have their messages deleted until someone unmutes them");
                             }
                             if (picked.includes("notify")) {
                                 effects.push("get a message");
@@ -3263,7 +3299,7 @@ Toxicity score: ${result.score}`
                                 "warntoggle <true|false>",
                                 "warntrusted <true|false>",
                                 "warnlimit <1-20>",
-                                "warnaction <kick|ban|notify [duration]>",
+                                "warnaction <kick|ban|mute|notify [duration]>",
                                 "warnexpiry <0-365>",
                                 "warncurses <0-50>",
                                 "warncursestime <1-60>",

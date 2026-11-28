@@ -49,6 +49,7 @@ const CATEGORIES = [
         commands: [
             { name: "translate", level: "all" },
             { name: "tts", level: "all" },
+            { name: "ttsticker", level: "all" },
             { name: "ttscss", level: "all" },
             { name: "edit", level: "all" },
             { name: "coin", level: "all" },
@@ -119,16 +120,18 @@ const CATEGORIES = [
         commands: [
             { name: "warn", level: "admin" },
             { name: "slowmode", level: "admin" },
-            { name: "warnings", level: "admin" },
+            { name: "modlog", level: "admin" },
             { name: "unwarn", level: "admin" },
             { name: "ban", level: "admin" },
             { name: "unban", level: "admin" },
             { name: "mute", level: "admin" },
             { name: "unmute", level: "admin" },
+            { name: "mutechat", level: "admin" },
+            { name: "unmutechat", level: "admin" },
             { name: "automute", level: "admin" },
             { name: "autounmute", level: "admin" },
             { name: "execute", level: "admin" },
-            { name: "deletemessages", level: "admin" },
+            { name: "delete", level: "admin" },
             { name: "tag", level: "admin" },
             { name: "mod", level: "admin" },
         ],
@@ -152,7 +155,7 @@ const CATEGORIES = [
 const DETAILS = {
     ai: {
         about: "Chats with the AI. It follows the group's conversation, and can also draw pictures and write short stories. If web search is on for the bot, the start of your question may be sent to its search server.",
-        usage: ["ai <prompt>", "ai witt (reply to a picture)", "ai <prompt> -voice [uk, es, fr, ja...]", "ai imagine <description>", "ai story <idea>", "ai personality preset <name>"],
+        usage: ["ai <prompt>", "ai witt (reply to a picture)", "ai <prompt> -voice [uk, es, fr, ja...] [-local]", "ai imagine <description>", "ai story <idea>", "ai personality preset <name>"],
     },
     summarise: {
         about: "Summarises some text, a message you reply to, or the last few messages in the group.",
@@ -231,8 +234,12 @@ const DETAILS = {
         usage: ["translate <language> <text>", "translate <language> (as a reply to a message)"],
     },
     tts: {
+        about: "Reads text out loud as a voice note with Fish Audio. Pick an accent or language first if you want, otherwise it works out the language itself. Add -local at the end to use the voice on the bot's machine instead.",
+        usage: ["tts [accent or language] <text> [-local]", "tts ja <english text> (english said with a japanese accent, the english is turned into katakana first)", "tts ja <text> -asis (reads the text as it is with the local piper voice)", "tts (as a reply to a message)"],
+    },
+    ttsticker: {
         about: "Draws text on a sticker. Run it on its own to see the fonts and options.",
-        usage: ["tts [font] <text>", "tts (as a reply to a message)"],
+        usage: ["ttsticker [font] <text>", "ttsticker (as a reply to a message)"],
     },
     ttscss: {
         about: "Draws text on a sticker with your own css, so it can look however you want. Run it on its own for an example. You can save a default style for yourself.",
@@ -303,7 +310,7 @@ const DETAILS = {
         usage: ["docs"],
     },
     credits: {
-        about: "Shows who gets the credit for the minesweeper and connect 4 games, and for youtube.",
+        about: "Shows who gets the credit for the minesweeper and connect 4 games, for youtube, and for picking songs and videos by number.",
         usage: ["credits"],
     },
     up: {
@@ -427,16 +434,16 @@ const DETAILS = {
         usage: ["flight <flight number>"],
     },
     song: {
-        about: "Sends a song as an mp3 (15 minutes and 25 MB max). Give it some words and it sends the top youtube match, or a youtube link. A mod can turn it off with !mod downloadmedia.",
+        about: "Sends a song as an mp3 (30 minutes and 50 MB max). Give it some words and it lists 5 youtube matches, then just reply with a number from 1 to 5 (no command) or cancel, or give it a youtube link. A mod can turn it off with !mod downloadmedia.",
         usage: ["song <youtube link or search>"],
     },
     warn: {
         about: "Gives someone a warning.",
         usage: ["warn <@user|number> <reason>"],
     },
-    warnings: {
-        about: "Lists the warnings in the group, or one person's.",
-        usage: ["warnings", "warnings <@user|number>"],
+    modlog: {
+        about: "Lists the warnings and mutes in the group, or one person's.",
+        usage: ["modlog", "modlog <@user|number>"],
     },
     unwarn: {
         about: "Takes a warning off someone. Add all to clear them.",
@@ -451,12 +458,20 @@ const DETAILS = {
         usage: ["unban [@user|number]"],
     },
     mute: {
-        about: "Locks the group so only admins can talk, for a set time if you want.",
-        usage: ["mute [duration]"],
+        about: "Deletes everything someone sends until you unmute them, for a set time if you want. A reason is needed.",
+        usage: ["mute [duration] <@user|number> <reason>"],
     },
     unmute: {
+        about: "Stops deleting someone's messages.",
+        usage: ["unmute <@user|number>"],
+    },
+    mutechat: {
+        about: "Locks the group so only admins can talk, for a set time if you want.",
+        usage: ["mutechat [duration]"],
+    },
+    unmutechat: {
         about: "Unlocks the group.",
-        usage: ["unmute"],
+        usage: ["unmutechat"],
     },
     automute: {
         about: "Mutes the group on a schedule.",
@@ -470,9 +485,9 @@ const DETAILS = {
         about: "Kicks someone out of the group.",
         usage: ["execute <@user|number>"],
     },
-    deletemessages: {
-        about: "Deletes the last few messages in the group, whoever sent them. The bot has to be an admin.",
-        usage: ["deletemessages <1-50>"],
+    delete: {
+        about: "Deletes the last few messages in the group, whoever sent them. Reply to a message with it to delete just that one. The bot has to be an admin.",
+        usage: ["delete <1-100>", "delete (as a reply)"],
     },
     mod: {
         about: "Changes the settings for this group.",
@@ -507,7 +522,7 @@ const DETAILS = {
         usage: ["ytinfo <youtube link>"],
     },
     video: {
-        about: "Sends a youtube video as an mp4 (10 minutes and 40 MB max, 480p at most). Give it a link, or some words and it sends the top match. A mod can turn it off with !mod downloadmedia.",
+        about: "Sends a youtube video as an mp4 (10 minutes and 40 MB max, 480p at most). Give it a link, or some words and it lists 5 matches, then just reply with a number from 1 to 5 (no command) or cancel. A mod can turn it off with !mod downloadmedia.",
         usage: ["video <youtube link or search>"],
     },
     toimage: {

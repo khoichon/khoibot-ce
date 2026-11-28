@@ -1,4 +1,4 @@
-// Animated stickers: the !tts animation styles, videos and GIFs, and image slideshows.
+// Animated stickers: the !ttsticker animation styles, videos and GIFs, and image slideshows.
 
 const fs = require("node:fs");
 const os = require("node:os");
