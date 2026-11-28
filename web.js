@@ -13,6 +13,7 @@ const { reply } = require("./utils.js");
 const { getGroupSetting } = require("./config.js");
 const { log } = require("./logging.js");
 const antiban = require("./antiban.js");
+const { looksLikeText } = require("./animation.js");
 
 const execFileAsync = promisify(execFile);
 
@@ -928,9 +929,12 @@ async function gifToMp4(buffer) {
     try {
         const input = path.join(dir, "in.gif");
         const output = path.join(dir, "out.mp4");
+        if (looksLikeText(buffer)) {
+            throw new Error("the gif is not a real media file");
+        }
         await fs.promises.writeFile(input, buffer);
         await execFileAsync("ffmpeg", [
-            "-y", "-i", input, "-t", "10", "-an",
+            "-y", "-protocol_whitelist", "file", "-i", input, "-t", "10", "-an",
             "-movflags", "faststart", "-pix_fmt", "yuv420p",
             "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
             output
@@ -1139,6 +1143,7 @@ async function handleWeather(sock, msg, ctx) {
 }
 
 const YOUTUBE_HOSTS = new Set(["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"]);
+const SOCIAL_HOSTS = new Set(["instagram.com", "www.instagram.com", "tiktok.com", "www.tiktok.com", "m.tiktok.com", "vm.tiktok.com", "vt.tiktok.com"]);
 const MAX_AUDIO_SECONDS = 30 * 60;
 const MAX_AUDIO_BYTES = 50 * 1024 * 1024;
 const YTDLP_TIMEOUT_MS = 2 * 60 * 1000;
@@ -1159,6 +1164,26 @@ async function youtubeTarget(input) {
         }
     }
     throw new UserError(`I could not find a video with "${shorten(input, 50)}" in it.`);
+}
+
+function isSocialLink(target) {
+    try {
+        return SOCIAL_HOSTS.has(new URL(target).hostname.toLowerCase());
+    } catch {
+        return false;
+    }
+}
+
+async function downloadTarget(input) {
+    const url = parseWebUrl(input);
+    const host = url.hostname.toLowerCase();
+    if (SOCIAL_HOSTS.has(host)) {
+        return url.href;
+    }
+    if (!YOUTUBE_HOSTS.has(host)) {
+        throw new UserError("Only YouTube, Instagram and TikTok links work here.");
+    }
+    return youtubeTarget(input);
 }
 
 const PICK_COUNT = 5;
@@ -1185,7 +1210,7 @@ async function chooseVideo(sock, msg, ctx, kind, input) {
     const key = pickKey(ctx);
     if (/^https?:\/\//i.test(input)) {
         pending.delete(key);
-        return youtubeTarget(input);
+        return downloadTarget(input);
     }
     if (ctx.senderJid === ctx.chatId && ctx.chatId.endsWith("@g.us")) {
         throw new UserError("I cannot tell who you are in this chat, so please send a link instead.");
@@ -1249,6 +1274,64 @@ async function runYtdlp(args, { search = false } = {}) {
     }
 }
 
+async function runLux(args) {
+    try {
+        const { stdout } = await execFileAsync(process.env.LUX_PATH || "lux", args, {
+            timeout: YTDLP_TIMEOUT_MS,
+            maxBuffer: 10 * 1024 * 1024
+        });
+        return stdout;
+    } catch (error) {
+        if (error.code === "ENOENT") {
+            throw new UserError("lux is not installed on the bot's machine yet.");
+        }
+        if (error.killed) {
+            throw new UserError("That took too long. Please try again later.");
+        }
+        throw error;
+    }
+}
+
+async function luxDownload(target, dir, maxBytes) {
+    let data;
+    try {
+        const parsed = JSON.parse(await runLux(["-j", target]));
+        data = Array.isArray(parsed) ? parsed[0] : parsed;
+    } catch (error) {
+        if (error instanceof UserError) {
+            throw error;
+        }
+        throw new UserError("I could not read that link. The post may be private or gone.");
+    }
+    if (!data || data.type !== "video") {
+        throw new UserError("That post has no video in it.");
+    }
+
+    const streams = Object.entries(data.streams || {})
+        .filter(([id]) => /^[\w-]{1,40}$/.test(id))
+        .map(([id, stream]) => {
+            const parts = Array.isArray(stream.urls) ? stream.urls.reduce((sum, part) => sum + (Number(part.size) || 0), 0) : 0;
+            return { id, size: Number(stream.size) || parts };
+        });
+    const fits = streams.filter(stream => stream.size > 0 && stream.size <= maxBytes).sort((a, b) => b.size - a.size);
+    const unknown = streams.filter(stream => !stream.size);
+    const chosen = fits[0] || unknown[0];
+    if (!chosen) {
+        throw new UserError(`That video is too big (${Math.round(maxBytes / 1024 / 1024)} MB maximum).`);
+    }
+
+    await runLux(["-f", chosen.id, "-o", dir, "-O", "social", target]);
+    const name = (await fs.promises.readdir(dir)).find(file => file.startsWith("social.") && file.endsWith(".mp4"));
+    if (!name) {
+        throw new UserError("I could not download that video.");
+    }
+    const file = path.join(dir, name);
+    if ((await fs.promises.stat(file)).size > maxBytes) {
+        throw new UserError(`That video is too big (${Math.round(maxBytes / 1024 / 1024)} MB maximum).`);
+    }
+    return { file, title: String(data.title || "") };
+}
+
 function clock(totalSeconds) {
     const hours = Math.floor(totalSeconds / 3600);
     const minutes = Math.floor((totalSeconds % 3600) / 60);
@@ -1293,6 +1376,21 @@ async function downloadsAllowed(sock, msg, { chatId, isGroup }) {
     return true;
 }
 
+async function sendEggVideo(sock, msg, { chatId, isGroup }) {
+    if ((isGroup && getGroupSetting(chatId, "downloadmedia") === false) || busy.video) {
+        return false;
+    }
+    try {
+        const link = process.env.HELPMENU_EGG_VIDEO;
+        const target = link ? await downloadTarget(link) : await youtubeTarget("the one that got away");
+        await sendVideo(sock, msg, target);
+        return true;
+    } catch (error) {
+        log.error("web", "The extra video did not work:", error.message);
+        return false;
+    }
+}
+
 const MAX_VIDEO_SECONDS = 10 * 60;
 const MAX_VIDEO_BYTES = 40 * 1024 * 1024;
 
@@ -1302,7 +1400,7 @@ async function handleDownloadVideo(sock, msg, ctx) {
     }
     const input = argsOf(ctx.text);
     if (!input) {
-        return usage(sock, msg, ctx, "video <youtube link or search>");
+        return usage(sock, msg, ctx, "video <youtube, instagram or tiktok link, or search>");
     }
     checkLength(input);
     const target = await chooseVideo(sock, msg, ctx, "video", input);
@@ -1321,6 +1419,13 @@ async function sendVideo(sock, msg, target, onSent) {
     let dir = "";
     try {
         dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "khoibot-video-"));
+        if (isSocialLink(target)) {
+            const social = await luxDownload(target, dir, MAX_VIDEO_BYTES);
+            const video = await fs.promises.readFile(social.file);
+            await sock.sendMessage(msg.key.remoteJid, { video, mimetype: "video/mp4", caption: shorten(social.title, 100) }, { quoted: msg });
+            onSent?.();
+            return;
+        }
         const stdout = await runYtdlp([
             "--match-filter", `duration<=${MAX_VIDEO_SECONDS}`,
             "--max-filesize", String(MAX_VIDEO_BYTES),
@@ -1354,7 +1459,7 @@ async function handleSong(sock, msg, ctx) {
     }
     const input = argsOf(ctx.text);
     if (!input) {
-        return usage(sock, msg, ctx, "song <youtube link or search>");
+        return usage(sock, msg, ctx, "song <youtube, instagram or tiktok link, or search>");
     }
     checkLength(input);
     const target = await chooseVideo(sock, msg, ctx, "song", input);
@@ -1373,6 +1478,28 @@ async function sendSong(sock, msg, target, onSent) {
     let dir = "";
     try {
         dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "khoibot-audio-"));
+        if (isSocialLink(target)) {
+            const social = await luxDownload(target, dir, MAX_VIDEO_BYTES);
+            const mp3 = path.join(dir, "social.mp3");
+            try {
+                await execFileAsync("ffmpeg", ["-y", "-v", "error", "-protocol_whitelist", "file", "-i", social.file, "-vn", "-ac", "2", "-b:a", "128k", mp3], { timeout: YTDLP_TIMEOUT_MS });
+            } catch (error) {
+                if (error.code === "ENOENT") {
+                    throw new UserError("ffmpeg is not installed on the bot's machine yet.");
+                }
+                throw error;
+            }
+            const audio = await fs.promises.readFile(mp3);
+            if (audio.length > MAX_AUDIO_BYTES) {
+                throw new UserError("That audio is too big (50 MB maximum).");
+            }
+            await sock.sendMessage(msg.key.remoteJid, { audio, mimetype: "audio/mpeg" }, { quoted: msg });
+            onSent?.();
+            if (social.title) {
+                await reply(sock, msg, shorten(social.title, 100));
+            }
+            return;
+        }
         const stdout = await runYtdlp([
             "--match-filter", `duration<=${MAX_AUDIO_SECONDS}`,
             "--max-filesize", String(MAX_AUDIO_BYTES),
@@ -1499,4 +1626,4 @@ async function handleCommand(sock, msg, ctx) {
     return (await COMMANDS[name](sock, msg, ctx)) !== false;
 }
 
-module.exports = { handleCommand, handlePick, search, fetchPage, webEnabled };
+module.exports = { handleCommand, handlePick, search, fetchPage, webEnabled, sendEggVideo };

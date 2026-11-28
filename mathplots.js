@@ -39,6 +39,12 @@ const DEFAULT_OPTIONS = {
     fallbackFillEntireScreen: true
 };
 
+const MAX_PLOT_STEPS = 20000000;
+const MAX_CALL_DEPTH = 200;
+let budget = null;
+let callDepth = 0;
+let limitHit = null;
+
 
 // =============================================================================
 // UTILITY
@@ -982,6 +988,11 @@ function parseExpression(input) {
 // =============================================================================
 
 function evaluate(node, env) {
+    if (budget !== null && --budget < 0) {
+        limitHit = 'That is too much to work out. Try something simpler.';
+        throw new Error(limitHit);
+    }
+
     switch (node.type) {
         case 'number':
             return node.value;
@@ -1141,6 +1152,11 @@ function evaluate(node, env) {
                 );
             }
 
+            if (callDepth >= MAX_CALL_DEPTH) {
+                limitHit = 'Functions are nested too deeply.';
+                throw new Error(limitHit);
+            }
+
             const child =
                 new Environment(env);
 
@@ -1151,7 +1167,12 @@ function evaluate(node, env) {
                 );
             }
 
-            return evaluate(fn.body, child);
+            callDepth++;
+            try {
+                return evaluate(fn.body, child);
+            } finally {
+                callDepth--;
+            }
         }
 
         default:
@@ -3582,6 +3603,21 @@ async function plot(
     input,
     options = {}
 ) {
+    budget = MAX_PLOT_STEPS;
+    callDepth = 0;
+    limitHit = null;
+    try {
+        return await drawPlot(input, options);
+    } finally {
+        budget = null;
+        callDepth = 0;
+    }
+}
+
+async function drawPlot(
+    input,
+    options = {}
+) {
     const merged = {
         ...DEFAULT_OPTIONS,
         ...options
@@ -3676,6 +3712,10 @@ async function plot(
                 error.message
             );
         }
+    }
+
+    if (limitHit) {
+        throw new Error(limitHit);
     }
 
     const svg =

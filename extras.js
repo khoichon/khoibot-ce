@@ -10,6 +10,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { downloadMediaMessage } = require("baileys");
+const { keepBrokenCopy } = require("./backup.js");
 
 const { getText, reply, recentKeys } = require("./utils.js");
 const { log } = require("./logging.js");
@@ -82,6 +83,7 @@ if (Array.isArray(saved.warns)) { state.warns = saved.warns.filter(entry => entr
         }
     } catch (error) {
         if (error.code !== "ENOENT") {
+            keepBrokenCopy(STATE_FILE);
             log.error("extras", "Could not read extras-state.json, starting fresh:", error);
         }
     }
@@ -429,6 +431,8 @@ async function handleTranslate(sock, msg, { text, commandPrefix }) {
 // Stickers
 // ============================================================
 
+const MAX_INPUT_PIXELS = 50 * 1000 * 1000;
+
 // WhatsApp wants a 512x512 webp, and static stickers should stay under about 100KB.
 async function toStickerBuffer(input) {
     // loaded here so the bot still starts if sharp is not available
@@ -436,7 +440,7 @@ async function toStickerBuffer(input) {
     let quality = 80;
     let output;
     do {
-        output = await sharp(input)
+        output = await sharp(input, { limitInputPixels: MAX_INPUT_PIXELS })
             .resize(512, 512, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
             .webp({ quality })
             .toBuffer();
@@ -502,18 +506,38 @@ async function handleSticker(sock, msg, { commandPrefix }) {
     }
 
     try {
-        const buffer = await downloadMediaMessage(
-            found.image,
-            "buffer",
-            {},
-            { logger: silentLogger, reuploadRequest: sock.updateMediaMessage }
-        );
+        const buffer = await downloadCapped(sock, found.image);
         const sticker = await toStickerBuffer(buffer);
         await sock.sendMessage(msg.key.remoteJid, { sticker }, { quoted: msg });
     } catch (error) {
+        if (error.code === "TOO_LARGE") {
+            await reply(sock, msg, "That image is too large (20 MB maximum).");
+            return;
+        }
         log.error("extras", "Sticker error:", error);
         await reply(sock, msg, "The sticker could not be created. The image may have expired, so please send it again.");
     }
+}
+
+async function downloadCapped(sock, source) {
+    const limit = animation.VIDEO_MAX_INPUT_BYTES;
+    const stream = await downloadMediaMessage(
+        source,
+        "stream",
+        {},
+        { logger: silentLogger, reuploadRequest: sock.updateMediaMessage }
+    );
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of stream) {
+        total += chunk.length;
+        if (total > limit) {
+            stream.destroy();
+            throw Object.assign(new Error("download is over the size limit"), { code: "TOO_LARGE" });
+        }
+        chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
 }
 
 // !edit works on an image or a sticker, as a reply or as the caption of an image.
@@ -579,12 +603,7 @@ async function handleEdit(sock, msg, { text, commandPrefix }) {
     }
 
     try {
-        const buffer = await downloadMediaMessage(
-            source.target,
-            "buffer",
-            {},
-            { logger: silentLogger, reuploadRequest: sock.updateMediaMessage }
-        );
+        const buffer = await downloadCapped(sock, source.target);
         const [operation] = parsed.operations;
         if (operation.type === "grid") {
             const image = await stickerEdit.renderGrid(buffer, operation.step);
@@ -598,6 +617,10 @@ async function handleEdit(sock, msg, { text, commandPrefix }) {
         const sticker = await stickerEdit.toSticker(await stickerEdit.render(buffer, parsed.operations));
         await sock.sendMessage(msg.key.remoteJid, { sticker }, { quoted: msg });
     } catch (error) {
+        if (error.code === "TOO_LARGE") {
+            await reply(sock, msg, "That image is too large (20 MB maximum).");
+            return;
+        }
         log.error("extras", "Sticker edit error:", error);
         await reply(sock, msg, "The sticker could not be edited. The image may have expired, so please send it again.");
     }
@@ -650,12 +673,7 @@ function findMedia(msg) {
 }
 
 function download(sock, media) {
-    return downloadMediaMessage(
-        media.source,
-        "buffer",
-        {},
-        { logger: silentLogger, reuploadRequest: sock.updateMediaMessage }
-    );
+    return downloadCapped(sock, media.source);
 }
 
 async function sendAnimated(sock, msg, sticker) {

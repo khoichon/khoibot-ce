@@ -97,7 +97,9 @@ function defaultGroupSettings() {
         // !ai works in every chat until someone turns it off with !mod toggleai
         toggleai: true,
         drunkmode: false,
-        gametimer: null
+        gametimer: null,
+        helpmenutries: 0,
+        helpmenuused: {}
     };
 }
 
@@ -158,6 +160,17 @@ function normalizeGroupSettings(raw) {
     settings.downloadmedia = coerceBoolean(raw.downloadmedia, true);
 
     settings.enablehelpmenu = coerceBoolean(raw.enablehelpmenu, false);
+
+    settings.helpmenutries = Number.isInteger(raw.helpmenutries) && raw.helpmenutries >= 0 ? raw.helpmenutries : 0;
+
+    settings.helpmenuused = {};
+    if (raw.helpmenuused && typeof raw.helpmenuused === "object" && !Array.isArray(raw.helpmenuused)) {
+        for (const [key, list] of Object.entries(raw.helpmenuused)) {
+            if (Array.isArray(list)) {
+                settings.helpmenuused[key] = list.filter(line => typeof line === "string").slice(-200);
+            }
+        }
+    }
 
     settings.trustedonly = coerceBoolean(raw.trustedonly, false);
 
@@ -368,6 +381,20 @@ function stableStringify(value) {
 }
 
 
+function normalizeTrustId(input) {
+    const text = String(input || "").trim().toLowerCase();
+    const full = text.match(/^(\d{5,20})@(s\.whatsapp\.net|lid)$/);
+    if (full) {
+        return text;
+    }
+    const digits = text.replace(/[\s()+-]/g, "");
+    if (/^\d{5,20}$/.test(digits)) {
+        return `${digits}@s.whatsapp.net`;
+    }
+    return null;
+}
+
+
 module.exports = {
     DOC_VERSION,
     BADWORDLOG_LEVELS,
@@ -378,6 +405,7 @@ WARN_ACTIONS,
     normalizeDoc,
     normalizeGroupSettings,
     isValidBadwordlog,
+    normalizeTrustId,
     stableStringify,
     isEqual
 };

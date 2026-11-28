@@ -265,6 +265,11 @@ function registerSignalHandlers() {
     process.on("SIGINT", () => shutdown(130));
     process.on("SIGTERM", () => shutdown(143));
 
+    process.on("uncaughtException", error => {
+        console.error(error);
+        shutdown(1);
+    });
+
     process.on("beforeExit", () => {
         if (dirty) {
             flushNow();

@@ -8,6 +8,7 @@ const { downloadMediaMessage, normalizeMessageContent } = require("baileys");
 
 const { reply } = require("./utils.js");
 const { log } = require("./logging.js");
+const { looksLikeText } = require("./animation.js");
 
 const execFileAsync = promisify(execFile);
 
@@ -61,6 +62,8 @@ function repliedMedia(msg) {
     }
     return null;
 }
+
+const MAX_INPUT_PIXELS = 50 * 1000 * 1000;
 
 async function download(sock, media) {
     const length = media.info.fileLength;
@@ -123,7 +126,7 @@ async function handleToImage(sock, msg, ctx) {
 
     const sharp = require("sharp");
     const source = await download(sock, media);
-    const image = await sharp(source).png().toBuffer();
+    const image = await sharp(source, { limitInputPixels: MAX_INPUT_PIXELS }).png().toBuffer();
     await sock.sendMessage(msg.key.remoteJid, { image }, { quoted: msg });
 }
 
@@ -157,12 +160,16 @@ async function handleToGif(sock, msg, ctx) {
 
             if (animatedSticker) {
                 const sharp = require("sharp");
-                await fs.promises.writeFile(input, await sharp(source, { animated: true }).gif().toBuffer());
+                await fs.promises.writeFile(input, await sharp(source, { animated: true, limitInputPixels: MAX_INPUT_PIXELS }).gif().toBuffer());
             } else {
+                if (looksLikeText(source)) {
+                    throw new UserError("That isn't a real video.");
+                }
                 await fs.promises.writeFile(input, source);
             }
 
             await runFfmpeg([
+                "-protocol_whitelist", "file",
                 "-i", input,
                 "-t", String(MAX_GIF_SECONDS),
                 "-an",
@@ -196,8 +203,12 @@ async function handleToMp3(sock, msg, ctx) {
         const audio = await withTempDir(async dir => {
             const input = path.join(dir, "input");
             const output = path.join(dir, "output.mp3");
+            if (looksLikeText(source)) {
+                throw new UserError("That isn't a real audio or video file.");
+            }
             await fs.promises.writeFile(input, source);
             await runFfmpeg([
+                "-protocol_whitelist", "file",
                 "-i", input,
                 "-t", String(MAX_MP3_SECONDS),
                 "-vn",
@@ -230,7 +241,7 @@ async function handleRemoveBg(sock, msg, ctx) {
         const cutout = await withTempDir(async dir => {
             const input = path.join(dir, "input.png");
             const output = path.join(dir, "output.png");
-            await sharp(source)
+            await sharp(source, { limitInputPixels: MAX_INPUT_PIXELS })
                 .rotate()
                 .resize({ width: 1500, height: 1500, fit: "inside", withoutEnlargement: true })
                 .png()

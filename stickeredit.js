@@ -225,10 +225,12 @@ function svgFor(operation) {
     return Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${SIZE}" height="${SIZE}">${shape}</svg>`);
 }
 
+const MAX_INPUT_PIXELS = 50 * 1000 * 1000;
+
 // The image on a transparent 512x512 canvas.
 async function canvasFrom(input) {
     const sharp = require("sharp");
-    return sharp(input)
+    return sharp(input, { limitInputPixels: MAX_INPUT_PIXELS })
         .resize(SIZE, SIZE, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
         .ensureAlpha()
         .png()

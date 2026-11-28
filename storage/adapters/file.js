@@ -8,6 +8,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { keepBrokenCopy } = require("../../backup.js");
 
 const DEFAULT_FILE = path.join(
     __dirname,
@@ -78,7 +79,12 @@ module.exports = {
                 throw error;
             }
 
-            return JSON.parse(content);
+            try {
+                return JSON.parse(content);
+            } catch (error) {
+                keepBrokenCopy(filePath);
+                throw error;
+            }
         }
 
 

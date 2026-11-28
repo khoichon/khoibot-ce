@@ -1,4 +1,6 @@
 const { execFile } = require("child_process");
+const fs = require("fs");
+const path = require("path");
 const { log } = require("./logging.js");
 
 // how often we look for new commits, in minutes
@@ -46,6 +48,20 @@ async function pm2Save() {
     }
 }
 
+async function brokenFile(changed, dir = __dirname) {
+    for (const file of changed.split("\n").map(line => line.trim()).filter(line => line.endsWith(".js"))) {
+        if (!fs.existsSync(path.join(dir, file))) {
+            continue;
+        }
+        try {
+            await run(process.execPath, ["--check", path.join(dir, file)], 30 * 1000);
+        } catch (error) {
+            return { file, message: error.message.split("\n").slice(0, 4).join(" ") };
+        }
+    }
+    return null;
+}
+
 async function check(beforeRestart) {
     if (busy) {
         return;
@@ -87,6 +103,13 @@ async function check(beforeRestart) {
         }
 
         const changed = await git("diff", "--name-only", before, "HEAD");
+        const broken = await brokenFile(changed);
+        if (broken) {
+            failedAt = latest;
+            await git("reset", "--keep", before);
+            log.error("deploy", `${broken.file} does not parse, went back to the old version and not restarting:`, broken.message);
+            return;
+        }
         if (/^package(-lock)?\.json$/m.test(changed)) {
             log.info("deploy", "dependencies changed, running npm install");
             await run("npm", ["install"], 5 * 60 * 1000);
@@ -95,7 +118,11 @@ async function check(beforeRestart) {
         await pm2Save();
 
         if (beforeRestart) {
-            beforeRestart();
+            try {
+                await beforeRestart();
+            } catch (error) {
+                log.error("deploy", "saving before the restart failed, restarting anyway:", error.message);
+            }
         }
         log.info("deploy", "update finished, restarting the bot");
         process.exit(0);
@@ -117,4 +144,4 @@ function start({ beforeRestart } = {}) {
     setInterval(() => check(beforeRestart), CHECK_MINUTES * 60 * 1000).unref();
 }
 
-module.exports = { start };
+module.exports = { start, check, brokenFile };

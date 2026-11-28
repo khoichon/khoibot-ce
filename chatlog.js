@@ -4,6 +4,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { log } = require("./logging.js");
+const { keepBrokenCopy } = require("./backup.js");
 
 const STATE_FILE = path.join(__dirname, "chatlog-state.json");
 
@@ -28,6 +29,7 @@ function load() {
     } catch (error) {
         // no file yet is normal the first time
         if (error.code !== "ENOENT") {
+            keepBrokenCopy(STATE_FILE);
             log.error("chatlog", "Could not read the saved messages:", error);
         }
     }

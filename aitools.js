@@ -11,6 +11,7 @@ const { reply } = require("./utils.js");
 const mediamod = require("./mediamod.js");
 const { getGroupSetting, setGroupSetting } = require("./config.js");
 const { drunkify } = require("./drunk.js");
+const { keepBrokenCopy } = require("./backup.js");
 
 const modelconfig = {
     summarize: "qwen3:8b",
@@ -449,6 +450,7 @@ function loadAiState() {
         }
     } catch (error) {
         if (error.code !== "ENOENT") {
+            keepBrokenCopy(AI_STATE_FILE);
             log.error("ai", "Could not read ai-state.json:", error);
         }
     }
@@ -1564,7 +1566,7 @@ async function guessAccent(text, source = "ai") {
         const [code, score] = stdout.trim().split(" ");
         const language = code === "zh" ? "ch" : code;
         log.info(source, "language guess:", language, score);
-        if (!(Number(score) >= LANGID_MIN_CONFIDENCE)) return DEFAULT_ACCENT;
+        if (!(Number(score) >= LANGID_MIN_CONFIDENCE)) return detectAccent(text);
         return Object.hasOwn(LANGUAGES, language) ? language : DEFAULT_ACCENT;
     } catch (error) {
         log.error(source, "language guess did not work, using the word lists instead:", error.message);
