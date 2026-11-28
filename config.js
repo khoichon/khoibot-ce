@@ -11,7 +11,8 @@ const store = require("./storage/store");
 const {
     defaultGroupSettings,
     normalizeGroupSettings,
-    isValidBadwordlog
+    isValidBadwordlog,
+    normalizeTrustId
 } = require("./storage/normalize");
 
 
@@ -288,6 +289,7 @@ module.exports = {
     addTrusted,
     removeTrusted,
     getTrusted,
+    normalizeTrustId,
 
     // Groups
     isGroupEnabled,

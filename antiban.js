@@ -5,6 +5,7 @@ const path = require("node:path");
 
 const { reply } = require("./utils.js");
 const { log } = require("./logging.js");
+const { keepBrokenCopy } = require("./backup.js");
 
 const STATE_FILE = path.join(__dirname, "antiban-state.json");
 
@@ -117,6 +118,7 @@ function loadState() {
         }
     } catch (error) {
         if (error.code !== "ENOENT") {
+            keepBrokenCopy(STATE_FILE);
             log.error("antiban", "Could not read antiban-state.json, starting fresh:", error);
         }
     }

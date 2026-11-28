@@ -2,6 +2,7 @@
 // go to the detoxify api, which looks for explicit content and reads any text in the picture.
 // everything here fails open, if the api is down the media just stays.
 
+const crypto = require("node:crypto");
 const { downloadMediaMessage, normalizeMessageContent } = require("baileys");
 const sharp = require("sharp");
 const { isImageBad } = require("./moderation.js");
@@ -20,6 +21,7 @@ const silentLogger = {
 
 // anything bigger than this is not worth downloading just to look at it
 const MAX_BYTES = 15 * 1024 * 1024;
+const MAX_INPUT_PIXELS = 50 * 1000 * 1000;
 
 // the model is slow on the pi, so only a few pictures are checked at the same time.
 // when it is busy the extra ones are let through instead of piling up
@@ -61,11 +63,28 @@ function findMedia(msg) {
     return null;
 }
 
-function hashOf(info) {
-    if (!info.fileSha256) {
-        return null;
+function hashOf(buffer) {
+    return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+async function downloadCapped(sock, media) {
+    const stream = await downloadMediaMessage(
+        media.wrapped,
+        "stream",
+        {},
+        { logger: silentLogger, reuploadRequest: sock.updateMediaMessage }
+    );
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of stream) {
+        total += chunk.length;
+        if (total > MAX_BYTES) {
+            stream.destroy();
+            return null;
+        }
+        chunks.push(chunk);
     }
-    return Buffer.from(info.fileSha256).toString("hex");
+    return Buffer.concat(chunks);
 }
 
 // returns null when there is nothing to check, otherwise { bad, kind, reason, score, text }
@@ -73,12 +92,6 @@ async function checkMessage(sock, msg, threshold = 0.9) {
     const media = findMedia(msg);
     if (!media) {
         return null;
-    }
-
-    const hash = hashOf(media.info);
-    if (hash && seen.has(hash)) {
-        const old = seen.get(hash);
-        return { ...old, kind: media.kind };
     }
 
     if (pending >= MAX_PENDING) {
@@ -91,18 +104,21 @@ async function checkMessage(sock, msg, threshold = 0.9) {
             if (Number(media.info.fileLength) > MAX_BYTES) {
                 return null;
             }
-            raw = await downloadMediaMessage(
-                media.wrapped,
-                "buffer",
-                {},
-                { logger: silentLogger, reuploadRequest: sock.updateMediaMessage }
-            );
+            raw = await downloadCapped(sock, media);
+            if (!raw) {
+                return null;
+            }
         } else {
             raw = Buffer.from(media.info.jpegThumbnail);
         }
 
+        const hash = hashOf(raw);
+        if (seen.has(hash)) {
+            return { ...seen.get(hash), kind: media.kind };
+        }
+
         // one flat jpeg that is not huge, animated stickers turn into their first frame
-        const picture = await sharp(raw)
+        const picture = await sharp(raw, { limitInputPixels: MAX_INPUT_PIXELS })
             .rotate()
             .resize({ width: 1024, height: 1024, fit: "inside", withoutEnlargement: true })
             .flatten({ background: "#ffffff" })
@@ -150,13 +166,11 @@ async function getPicture(sock, msg, ownOnly) {
         if (Number(media.info.fileLength) > MAX_BYTES) {
             return null;
         }
-        const raw = await downloadMediaMessage(
-            media.wrapped,
-            "buffer",
-            {},
-            { logger: silentLogger, reuploadRequest: sock.updateMediaMessage }
-        );
-        const buffer = await sharp(raw)
+        const raw = await downloadCapped(sock, media);
+        if (!raw) {
+            return null;
+        }
+        const buffer = await sharp(raw, { limitInputPixels: MAX_INPUT_PIXELS })
             .rotate()
             .resize({ width: 1024, height: 1024, fit: "inside", withoutEnlargement: true })
             .flatten({ background: "#ffffff" })

@@ -434,8 +434,8 @@ const DETAILS = {
         usage: ["flight <flight number>"],
     },
     song: {
-        about: "Sends a song as an mp3 (30 minutes and 50 MB max). Give it some words and it lists 5 youtube matches, then just reply with a number from 1 to 5 (no command) or cancel, or give it a youtube link. A mod can turn it off with !mod downloadmedia.",
-        usage: ["song <youtube link or search>"],
+        about: "Sends a song as an mp3 (30 minutes and 50 MB max). Give it some words and it lists 5 youtube matches, then just reply with a number from 1 to 5 (no command) or cancel, or give it a youtube, instagram or tiktok link. A mod can turn it off with !mod downloadmedia.",
+        usage: ["song <youtube, instagram or tiktok link, or search>"],
     },
     warn: {
         about: "Gives someone a warning.",
@@ -522,8 +522,8 @@ const DETAILS = {
         usage: ["ytinfo <youtube link>"],
     },
     video: {
-        about: "Sends a youtube video as an mp4 (10 minutes and 40 MB max, 480p at most). Give it a link, or some words and it lists 5 matches, then just reply with a number from 1 to 5 (no command) or cancel. A mod can turn it off with !mod downloadmedia.",
-        usage: ["video <youtube link or search>"],
+        about: "Sends a youtube, instagram or tiktok video as an mp4 (10 minutes and 40 MB max, 480p at most). Give it a link, or some words and it lists 5 matches, then just reply with a number from 1 to 5 (no command) or cancel. A mod can turn it off with !mod downloadmedia.",
+        usage: ["video <youtube, instagram or tiktok link, or search>"],
     },
     toimage: {
         about: "Turns a sticker into a normal picture.",

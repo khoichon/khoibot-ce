@@ -97,13 +97,15 @@ async function framesToWebp(frames, delays) {
     throw new Error("The sticker is too large even at the lowest quality.");
 }
 
+const MAX_INPUT_PIXELS = 50 * 1000 * 1000;
+
 // Images shown one after another, each for `holdMs`.
 async function slideshowToWebp(images, holdMs = 700) {
     const sharp = require("sharp");
     const frames = [];
     for (const image of images) {
         frames.push(
-            await sharp(image)
+            await sharp(image, { limitInputPixels: MAX_INPUT_PIXELS })
                 .resize(512, 512, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
                 .ensureAlpha()
                 .png()
@@ -134,12 +136,29 @@ const VIDEO_ATTEMPTS = [
     { fps: 8, quality: 20, seconds: 5, size: 384 }
 ];
 
+function looksLikeText(buffer) {
+    const head = buffer.subarray(0, 64);
+    if (head.length < 12) {
+        return true;
+    }
+    return head.every(byte => byte === 9 || byte === 10 || byte === 13 || (byte >= 32 && byte <= 126));
+}
+
+function badInput(what) {
+    const error = new Error(`The ${what} is not a real media file.`);
+    error.code = "BAD_INPUT";
+    return error;
+}
+
 // Returns { buffer, reduced } where reduced says if anything past the first try was needed.
 async function videoToWebp(input, { ffmpeg = "ffmpeg" } = {}) {
     if (input.length > VIDEO_MAX_INPUT_BYTES) {
         const error = new Error("The video is too large.");
         error.code = "TOO_LARGE";
         throw error;
+    }
+    if (looksLikeText(input)) {
+        throw badInput("video");
     }
 
     const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "animsticker-"));
@@ -158,7 +177,7 @@ async function videoToWebp(input, { ffmpeg = "ffmpeg" } = {}) {
                 `pad=${size}:${size}:(ow-iw)/2:(oh-ih)/2:color=black@0`
             ].join(",");
 
-            const args = ["-y", "-v", "error", "-i", source, "-t", String(seconds), "-an", "-vf", base,
+            const args = ["-y", "-v", "error", "-protocol_whitelist", "file", "-i", source, "-t", String(seconds), "-an", "-vf", base,
                 "-c:v", "libwebp_anim", "-lossless", "0", "-quality", String(quality),
                 "-compression_level", "4", "-loop", "0", target];
 
@@ -190,6 +209,9 @@ async function gifToMp4(input, { ffmpeg = "ffmpeg" } = {}) {
         error.code = "TOO_LARGE";
         throw error;
     }
+    if (looksLikeText(input)) {
+        throw badInput("gif");
+    }
 
     const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "memevid-"));
     const source = path.join(dir, "input.gif");
@@ -198,7 +220,7 @@ async function gifToMp4(input, { ffmpeg = "ffmpeg" } = {}) {
     try {
         await fs.promises.writeFile(source, input);
 
-        const args = ["-y", "-v", "error", "-i", source, "-an", "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        const args = ["-y", "-v", "error", "-protocol_whitelist", "file", "-i", source, "-an", "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p",
             "-movflags", "+faststart", target];
 
@@ -241,6 +263,7 @@ module.exports = {
     FRAME_DELAY_MS,
     MAX_BYTES,
     VIDEO_MAX_INPUT_BYTES,
+    looksLikeText,
     frameCount,
     frameState,
     framesToWebp,

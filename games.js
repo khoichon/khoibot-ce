@@ -10,6 +10,7 @@ const { log, describeSender, describeGroup } = require("./logging.js");
 const fs = require("fs");
 const path = require("path");
 const chessgame = require("./chessgame.js");
+const { keepBrokenCopy } = require("./backup.js");
 const sharp = require("sharp");
 
 // ============================================================
@@ -31,6 +32,7 @@ function loadSavedGames() {
         return JSON.parse(fs.readFileSync(GAMES_STATE_FILE, "utf8"));
     } catch (error) {
         if (error.code !== "ENOENT") {
+            keepBrokenCopy(GAMES_STATE_FILE);
             log.error("games", "Could not read games-state.json:", error);
         }
         return null;

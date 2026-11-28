@@ -18,4 +18,12 @@ const getMessage = (key) => {
   return messageList[randomIndex];
 };
 
-module.exports = { getMessage };
+const getMessages = (key) => {
+  const messageList = messages[key];
+  if (!messageList) {
+    throw new Error(`Message key "${key}" not found in messages.yaml`);
+  }
+  return [...messageList];
+};
+
+module.exports = { getMessage, getMessages };

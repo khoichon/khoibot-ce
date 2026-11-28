@@ -23,12 +23,15 @@ const { getText, reply, replyTemporary, rememberKey } = require("./utils.js");
 
 const aitools = require("./aitools.js");
 const chatlog = require("./chatlog.js");
+const { closeStore } = require("./storage");
+const helpmenuegg = require("./helpmenuegg.js");
 
 const {
     isTrusted,
     addTrusted,
     removeTrusted,
     getTrusted,
+    normalizeTrustId,
 
     isGroupEnabled,
     enableGroup,
@@ -73,9 +76,6 @@ const {
     evaluate
 } = require("./mathplots.js")
 
-const {
-    getMessage
-} = require("./messages.js")
 const { drunkify } = require("./drunk.js");
 
 const devMode = process.argv.includes("--dev");
@@ -425,7 +425,12 @@ const startSock = async () => {
                 // bring back any word or number games that were running before the restart
                 games.restoreGames(sock);
                 // checks github for new commits and restarts when there are some, if its turned on
-                autoDeploy.start({ beforeRestart: games.saveGames });
+                autoDeploy.start({
+                    beforeRestart: async () => {
+                        games.saveGames();
+                        await closeStore();
+                    }
+                });
 
                 log.info("conn",
                     "Opened connection!"
@@ -999,6 +1004,8 @@ const startSock = async () => {
                     if (!banned && await games.handleAnswer(sock, msg, { chatId, senderJid, text })) {
                         continue;
                     }
+
+                    helpmenuegg.listen(sock, msg, { chatId, senderJid, text });
 
                     if (!banned && await web.handlePick(sock, msg, { chatId, senderJid, text, isGroup, trusted, groupAdmin, commandPrefix })) {
                         continue;
@@ -2053,12 +2060,16 @@ Toxicity score: ${result.score}`
                                 .trim();
 
 
-                        if (!identifier) {
+                        const cleanId =
+                            normalizeTrustId(identifier);
+
+
+                        if (!cleanId) {
 
                             await reply(
                                 sock,
                                 msg,
-                                "Usage: !trust <PN/LID>"
+                                "Usage: !trust <number or number@lid>. Groups and anything that isn't a number can't be trusted."
                             );
 
                             continue;
@@ -2066,15 +2077,15 @@ Toxicity score: ${result.score}`
 
 
                         const changed =
-                            addTrusted(identifier);
+                            addTrusted(cleanId);
 
 
                         await reply(
                             sock,
                             msg,
                             changed
-                                ? `Added ${identifier} to trusted users.`
-                                : `${identifier} is already trusted.`
+                                ? `Added ${cleanId} to trusted users.`
+                                : `${cleanId} is already trusted.`
                         );
                     }
 
@@ -2119,16 +2130,32 @@ Toxicity score: ${result.score}`
                         }
 
 
+                        const target =
+                            normalizeTrustId(identifier) || identifier;
+
+
+                        if (getTrusted().length <= 1 && getTrusted().includes(target)) {
+
+                            await reply(
+                                sock,
+                                msg,
+                                "That's the last trusted user, so they can't be removed."
+                            );
+
+                            continue;
+                        }
+
+
                         const changed =
-                            removeTrusted(identifier);
+                            removeTrusted(target);
 
 
                         await reply(
                             sock,
                             msg,
                             changed
-                                ? `Removed ${identifier} from trusted users.`
-                                : `${identifier} wasn't trusted.`
+                                ? `Removed ${target} from trusted users.`
+                                : `${target} wasn't trusted.`
                         );
                     }
 
@@ -2673,12 +2700,15 @@ Toxicity score: ${result.score}`
                                 await reply(sock, msg, "Usage: !mod enablehelpmenu <true|false>");
                                 continue;
                             }
-                            if (value === "true" && Math.random() >= 0.001) {
-                                await reply(sock, msg, getMessage("refusemodhelp"));
+                            if (value === "true") {
+                                const result = helpmenuegg.attempt(sock, msg, { chatId, senderJid, trusted, groupAdmin });
+                                if (result.enable) {
+                                    setGroupSetting(chatId, "enablehelpmenu", true);
+                                }
                                 continue;
                             }
-                            setGroupSetting(chatId, "enablehelpmenu", value === "true");
-                            await reply(sock, msg, `enablehelpmenu set to ${value}`);
+                            setGroupSetting(chatId, "enablehelpmenu", false);
+                            await reply(sock, msg, "enablehelpmenu set to false");
                             continue;
                         }
 

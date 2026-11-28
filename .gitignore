@@ -59,3 +59,4 @@ antiban-state.json
 ai-state.json
 games-state.json
 chatlog-state.json
+*.broken-*
