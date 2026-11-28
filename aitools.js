@@ -362,7 +362,7 @@ const MAX_OLD_MESSAGE_CHARS = 500; // older messages are cut to this before goin
 const DRUNK_BURP_CHANCE = 0.1;
 
 const BASE_PROMPT = "You are a helpful assistant in a WhatsApp group chat. Keep answers short and easy to read on a phone. Use plain text only, no markdown headings or tables.";
-const BOT_INFO = "You are the AI (the ai, not the bot itself!) *inside khoibot*, a WhatsApp bot. Commands start with ! and !help lists them. Besides chatting with you, khoibot can play games (!decrypt, !math, !wordle, !chess, !ttt, !blackjack, !slots), make stickers (!sticker, !tts, !animsticker), summarise text (!summarise), translate (!translate), roast or compliment people (!roast, !compliment), look things up (!wiki, !define, !weather, !scp), send memes (!meme), plot graphs (!plot), and help admins run a group (!mute, !warn, a bad word filter and a link blocker). Only talk about this if someone asks what you or the bot can do, and keep it short. Never invent commands that are not listed here, tell people to do !help instead. Khoibot was made by khoichon, otherwise known as nohciohk and Maxwell.";
+const BOT_INFO = "You are the AI (the ai, not the bot itself!) *inside khoibot*, a WhatsApp bot. Commands start with ! and !help lists them. Besides chatting with you, khoibot can play games (!decrypt, !math, !wordle, !chess, !ttt, !blackjack, !slots), make stickers (!sticker, !ttsticker (text to sticker), !animsticker), summarise text (!summarise), translate (!translate), roast or compliment people (!roast, !compliment), look things up (!wiki, !define, !weather, !scp), send memes (!meme), plot graphs (!plot), and help admins run a group (!mute, !warn, a bad word filter and a link blocker). Only talk about this if someone asks what you or the bot can do, and keep it short. Never invent commands that are not listed here, tell people to do !help instead. Khoibot was made by khoichon, otherwise known as nohciohk and Maxwell.";
 
 const AI_USAGE = [
     "Usage: !ai <message> to chat. I remember the last 10 messages of the conversation.",
@@ -529,7 +529,7 @@ async function askAi(chatId, prompt, choice, context) {
     busyChats.add(chatId);
     try {
         const picked = await pickClientFor(choice || chatModels.get(chatId));
-        const grounding = await groundPrompt(prompt);
+        const grounding = await groundPrompt(prompt, getHistory(chatId));
         const history = getHistory(chatId);
         const timeout = new Promise((_, no) => setTimeout(() => no(new Error("timeout")), AI_TIMEOUT_MS));
         const response = await Promise.race([
@@ -814,10 +814,14 @@ const imagineConfig = {
     host: (process.env.DESKTOP_IMAGINE_HOST || "").replace(/\/+$/, ""),
     steps: Number(process.env.IMAGINE_STEPS) || 20,
     width: Number(process.env.IMAGINE_WIDTH) || 512,
-    height: Number(process.env.IMAGINE_HEIGHT) || 512
+    height: Number(process.env.IMAGINE_HEIGHT) || 512,
+    apiUrl: process.env.IMAGINE_API_URL || "https://shizoapi.onrender.com/api/ai/imagine",
+    apiKey: process.env.IMAGINE_API_KEY || "shizo"
 };
 const MAX_IMAGINE_CHARS = 300;
 const IMAGINE_TIMEOUT_MS = 3 * 60 * 1000;
+const IMAGINE_API_TIMEOUT_MS = 90 * 1000;
+const MAX_IMAGINE_API_BYTES = 10 * 1024 * 1024;
 // this isnt a real filter, it just nudges the model away from the worst stuff
 const IMAGINE_NEGATIVE = "nsfw, nudity, gore, blood, text, watermark, low quality, blurry";
 // one picture at a time so the gpu doesnt get overloaded
@@ -825,13 +829,7 @@ let imagineBusy = false;
 
 // fetch that gives up after a while instead of hanging forever
 async function fetchWithTimeout(url, options, ms) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), ms);
-    try {
-        return await fetch(url, { ...options, signal: controller.signal });
-    } finally {
-        clearTimeout(timer);
-    }
+    return fetch(url, { ...options, signal: AbortSignal.timeout(ms) });
 }
 
 // ping the desktop first, if its off we say so straight away instead of leaving people hanging
@@ -866,11 +864,18 @@ const IMAGINE_SIZES = {
 // splits "a cat astronaut -style anime -size wide" into the prompt and the options. if something is off it gives back { error } with a message for the chat
 function parseImagineArgs(text) {
     const parts = (" " + text).split(/\s--?(?=[a-zA-Z])/);
-    const result = { prompt: parts.shift().trim(), style: null, size: null };
+    const result = { prompt: parts.shift().trim(), style: null, size: null, local: false, nolocal: false };
     for (const part of parts) {
         const [rawName, ...valueWords] = part.trim().split(/\s+/);
         const name = (rawName || "").toLowerCase();
         const value = valueWords.join(" ").toLowerCase();
+        if (name === "local" || name === "nolocal") {
+            result[name] = true;
+            if (result.local && result.nolocal) {
+                return { error: "Pick either -local or -nolocal, not both." };
+            }
+            continue;
+        }
         if (name === "style") {
             const styles = Object.keys(IMAGINE_STYLES).join(", ");
             if (!value) {
@@ -890,7 +895,7 @@ function parseImagineArgs(text) {
             }
             result.size = value;
         } else {
-            return { error: `Unknown option "-${name}". You can use -style and -size.` };
+            return { error: `Unknown option "-${name}". You can use -style, -size, -local and -nolocal.` };
         }
     }
     return result;
@@ -924,10 +929,185 @@ async function generateImage(prompt, size) {
     return Buffer.from(data.images[0], "base64");
 }
 
+async function readFailure(response) {
+    try {
+        const chunks = [];
+        let total = 0;
+        for await (const chunk of response.body) {
+            chunks.push(chunk);
+            total += chunk.length;
+            if (total >= 512) break;
+        }
+        return Buffer.concat(chunks).toString("utf8").replace(/\s+/g, " ").slice(0, 150);
+    } catch {
+        return "";
+    }
+}
+
+async function readLimited(response, limit) {
+    if (Number(response.headers.get("content-length")) > limit) {
+        throw new Error("the response is too big");
+    }
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of response.body || []) {
+        total += chunk.length;
+        if (total > limit) {
+            throw new Error("the response is too big");
+        }
+        chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+}
+
+function imageMime(image) {
+    if (image.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+    if (image[0] === 0xff && image[1] === 0xd8 && image[2] === 0xff) return "image/jpeg";
+    if (image.subarray(0, 4).toString() === "RIFF" && image.subarray(8, 12).toString() === "WEBP") return "image/webp";
+    if (image.subarray(0, 3).toString() === "GIF") return "image/gif";
+    return "";
+}
+
+async function readPicture(response, name) {
+    const type = response.headers.get("content-type") || "";
+    if (/json|text|html/i.test(type)) {
+        throw new Error(`${name} sent back ${type} instead of a picture`);
+    }
+    const image = await readLimited(response, MAX_IMAGINE_API_BYTES);
+    if (!imageMime(image)) {
+        throw new Error(`${name} did not send back a real picture`);
+    }
+    return image;
+}
+
+async function toJpeg(image) {
+    if (image.subarray(0, 4).toString() !== "RIFF" || image.subarray(8, 12).toString() !== "WEBP") {
+        return image;
+    }
+    let dir = "";
+    try {
+        dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "khoibot-imagine-"));
+        const input = path.join(dir, "in.webp");
+        const output = path.join(dir, "out.jpg");
+        await fs.promises.writeFile(input, image);
+        await execFileAsync("ffmpeg", ["-y", "-loglevel", "error", "-i", input, "-q:v", "3", output], { timeout: 30000 });
+        return await fs.promises.readFile(output);
+    } catch {
+        return image;
+    } finally {
+        if (dir) await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => { });
+    }
+}
+
+async function generateWithOvh(prompt) {
+    const headers = { "Content-Type": "application/json", Accept: "application/octet-stream" };
+    if (process.env.OVH_AI_TOKEN) {
+        headers.Authorization = `Bearer ${process.env.OVH_AI_TOKEN}`;
+    }
+    const response = await fetchWithTimeout(
+        "https://stable-diffusion-xl.endpoints.kepler.ai.cloud.ovh.net/api/text2image",
+        { method: "POST", headers, body: JSON.stringify({ prompt, negative_prompt: IMAGINE_NEGATIVE }) },
+        IMAGINE_API_TIMEOUT_MS
+    );
+    if (!response.ok) {
+        throw new Error(`ovh answered ${response.status}: ${await readFailure(response)}`);
+    }
+    return readPicture(response, "ovh");
+}
+
+const HORDE_URL = "https://aihorde.net/api/v2";
+const HORDE_WAIT_MS = 2.5 * 60 * 1000;
+const HORDE_POLL_MS = 4000;
+const MAX_HORDE_RESULT_BYTES = Math.ceil(MAX_IMAGINE_API_BYTES * 4 / 3) + 64 * 1024;
+const HORDE_SIZES = { wide: { width: 640, height: 448 }, tall: { width: 448, height: 640 } };
+
+async function generateWithHorde(prompt, sizeName) {
+    const size = HORDE_SIZES[sizeName] || { width: 512, height: 512 };
+    const headers = { "Content-Type": "application/json", apikey: process.env.HORDE_API_KEY || "0000000000", "Client-Agent": "khoibot:1:khoichon" };
+    const start = await fetchWithTimeout(`${HORDE_URL}/generate/async`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+            prompt: `${prompt} ### ${IMAGINE_NEGATIVE}`,
+            params: { ...size, steps: 25, n: 1, cfg_scale: 7, sampler_name: "k_euler_a" },
+            nsfw: false,
+            censor_nsfw: true,
+            r2: false
+        })
+    }, 15000);
+    if (!start.ok) {
+        throw new Error(`the horde answered ${start.status}: ${await readFailure(start)}`);
+    }
+    const { id } = await start.json();
+    if (!id) {
+        throw new Error("the horde did not give a job id");
+    }
+
+    try {
+        const giveUpAt = Date.now() + HORDE_WAIT_MS;
+        while (Date.now() < giveUpAt) {
+            await new Promise(resolve => setTimeout(resolve, HORDE_POLL_MS));
+            const check = await fetchWithTimeout(`${HORDE_URL}/generate/check/${id}`, { headers }, 10000);
+            if (!check.ok) {
+                throw new Error(`the horde check answered ${check.status}: ${await readFailure(check)}`);
+            }
+            const state = await check.json();
+            if (state.faulted) {
+                throw new Error("the horde job failed");
+            }
+            if (!state.done) {
+                continue;
+            }
+            const result = await fetchWithTimeout(`${HORDE_URL}/generate/status/${id}`, { headers }, 30000);
+            if (!result.ok) {
+                throw new Error(`the horde result answered ${result.status}: ${await readFailure(result)}`);
+            }
+            const picture = JSON.parse((await readLimited(result, MAX_HORDE_RESULT_BYTES)).toString("utf8")).generations?.[0];
+            if (!picture?.img || picture.censored || /^https?:/i.test(picture.img)) {
+                throw new Error(picture?.censored ? "the horde censored the picture" : "the horde did not send a picture back");
+            }
+            const image = Buffer.from(picture.img, "base64");
+            if (!imageMime(image)) {
+                throw new Error("horde did not send back a real picture");
+            }
+            return toJpeg(image);
+        }
+        throw new Error("the horde took too long");
+    } catch (error) {
+        await fetchWithTimeout(`${HORDE_URL}/generate/status/${id}`, { method: "DELETE", headers }, 10000).catch(() => { });
+        throw error;
+    }
+}
+
+const ONLINE_GENERATORS = [
+    ["ovh", generateWithOvh],
+    ["horde", generateWithHorde],
+    ["shizo", generateWithApi]
+];
+
+async function generateWithApi(prompt) {
+    const url = new URL(imagineConfig.apiUrl);
+    url.searchParams.set("apikey", imagineConfig.apiKey);
+    url.searchParams.set("query", prompt);
+    const response = await fetchWithTimeout(url, {}, IMAGINE_API_TIMEOUT_MS);
+    if (!response.ok) {
+        throw new Error(`the image api answered ${response.status}: ${await readFailure(response)}`);
+    }
+    const type = response.headers.get("content-type") || "";
+    if (!type.startsWith("image/")) {
+        throw new Error(`the image api sent back ${type || "something"} instead of a picture`);
+    }
+    const image = await readLimited(response, MAX_IMAGINE_API_BYTES);
+    if (!imageMime(image)) {
+        throw new Error("the image api did not send back a real picture");
+    }
+    return image;
+}
+
 // argument is whatever comes after "!ai imagine". it replies by itself since the answer is a picture, not text
 async function handleImagine(sock, msg, { chatId, trusted, argument }) {
     const text = argument.trim();
-    if (!imagineConfig.enabled || !imagineConfig.host) {
+    if (!imagineConfig.enabled) {
         await reply(sock, msg, "Image generation is not enabled on this bot.");
         return;
     }
@@ -956,7 +1136,7 @@ async function handleImagine(sock, msg, { chatId, trusted, argument }) {
     }
     const prompt = parsed.prompt;
     if (!prompt) {
-        await reply(sock, msg, "Usage: !ai imagine <description> [-style name] [-size wide|tall|square], for example: !ai imagine a cat astronaut -style anime");
+        await reply(sock, msg, "Usage: !ai imagine <description> [-style name] [-size wide|tall|square] [-local|-nolocal], for example: !ai imagine a cat astronaut -style anime");
         return;
     }
     if (prompt.length > MAX_IMAGINE_CHARS) {
@@ -968,21 +1148,47 @@ async function handleImagine(sock, msg, { chatId, trusted, argument }) {
         return;
     }
 
+    const useApi = !parsed.local;
+    const useLocal = !parsed.nolocal && Boolean(imagineConfig.host);
+    if (!useApi && !useLocal) {
+        await reply(sock, msg, "The desktop image generator is not set up on this bot.");
+        return;
+    }
+
     imagineBusy = true;
     try {
-        if (!await imagineOnline()) {
-            await reply(sock, msg, "The image generator is not available right now. Please try again later.");
+        await reply(sock, msg, "Generating your image. This can take a minute.");
+        const fullPrompt = parsed.style ? `${prompt}, ${IMAGINE_STYLES[parsed.style]}` : prompt;
+        let image = null;
+        let sized = false;
+        if (useApi) {
+            for (const [name, generate] of ONLINE_GENERATORS) {
+                try {
+                    image = await generate(fullPrompt, parsed.size);
+                    sized = name === "horde";
+                    break;
+                } catch (error) {
+                    log.error("ai", `The ${name} image generator failed:`, error);
+                }
+            }
+        }
+        if (!image && useLocal) {
+            if (!await imagineOnline()) {
+                await reply(sock, msg, "The image generator is not available right now. Please try again later.");
+                return;
+            }
+            const size = IMAGINE_SIZES[parsed.size] || { width: imagineConfig.width, height: imagineConfig.height };
+            image = await generateImage(fullPrompt, size);
+            sized = true;
+        }
+        if (!image) {
+            await reply(sock, msg, "The online image generator is not working right now. Please try again later.");
             return;
         }
-        await reply(sock, msg, "Generating your image. This can take a minute.");
-        // no size given (or square) means whatever the default is in the .env
-        const size = IMAGINE_SIZES[parsed.size] || { width: imagineConfig.width, height: imagineConfig.height };
-        const fullPrompt = parsed.style ? `${prompt}, ${IMAGINE_STYLES[parsed.style]}` : prompt;
-        const image = await generateImage(fullPrompt, size);
         // the caption shows the options too, so people can see what they picked
-        const picked = [parsed.style, parsed.size].filter(Boolean);
+        const picked = [parsed.style, sized ? parsed.size : null].filter(Boolean);
         const caption = picked.length ? `Prompt: ${prompt} (${picked.join(", ")})` : `Prompt: ${prompt}`;
-        await sock.sendMessage(msg.key.remoteJid, { image, caption }, { quoted: msg });
+        await sock.sendMessage(msg.key.remoteJid, { image, caption, mimetype: imageMime(image) || "image/jpeg" }, { quoted: msg });
     } catch (error) {
         log.error("ai", "Error generating an image:", error);
         await reply(sock, msg, "The image could not be generated. Please try again later.");
@@ -1155,11 +1361,19 @@ function shouldSearch(prompt) {
     return GROUND_QUESTION.test(text) && !GROUND_CHAT.test(text);
 }
 
+function searchQuery(prompt, history) {
+    if (!/\b(he|she|him|her|his|they|them|their|it|its|that|this|there)\b/i.test(prompt)) {
+        return prompt.slice(0, 200);
+    }
+    const before = history.filter(m => m.role === "user").slice(-2).map(m => m.content).join(" ");
+    return `${before.slice(0, 150)} ${prompt.slice(0, 150)}`.trim();
+}
+
 function giveUpAfter(ms) {
     return new Promise((_, no) => setTimeout(() => no(new Error("timeout")), ms).unref?.());
 }
 
-async function groundPrompt(prompt) {
+async function groundPrompt(prompt, history = []) {
     if (process.env.ENABLE_AI_SEARCH !== "1" || !shouldSearch(prompt)) {
         return null;
     }
@@ -1170,7 +1384,7 @@ async function groundPrompt(prompt) {
             return null;
         }
 
-        const results = await Promise.race([web.search(prompt.slice(0, 200), { limit: 4, terms: "", snippetLength: 500 }), giveUpAfter(GROUND_SEARCH_MS)]);
+        const results = await Promise.race([web.search(searchQuery(prompt, history), { limit: 4, terms: "", snippetLength: 500 }), giveUpAfter(GROUND_SEARCH_MS)]);
         if (!results?.length) {
             return null;
         }
@@ -1258,8 +1472,24 @@ const VOICES = Object.fromEntries((process.env.PIPER_VOICES || "us=en_US-lessac-
     .split(",")
     .map(pair => pair.split("=").map(part => part.trim()))
     .filter(([name, model]) => name && model)
-    .map(([name, model]) => [name.toLowerCase(), model]));
+    .map(([name, model]) => [name.toLowerCase(), model.split("|").map(one => one.trim()).filter(Boolean)]));
 const DEFAULT_ACCENT = Object.hasOwn(VOICES, "us") ? "us" : Object.keys(VOICES)[0];
+
+function voiceModel(name) {
+    if (Object.hasOwn(VOICES, name)) return VOICES[name][0] || null;
+    const match = /^(.*\D)(\d+)$/.exec(name);
+    const models = match && Object.hasOwn(VOICES, match[1]) ? VOICES[match[1]] : null;
+    return models ? models[Number(match[2]) - 1] || null : null;
+}
+
+function voiceProblem(name) {
+    const match = /^(.*\D)(\d+)$/.exec(name);
+    if (!match || Object.hasOwn(VOICES, name) || !Object.hasOwn(VOICES, match[1])) return "";
+    const base = match[1];
+    const count = VOICES[base].length;
+    if (Number(match[2]) >= 1 && Number(match[2]) <= count) return "";
+    return `${base} only has ${count} voice${count === 1 ? "" : "s"}, try ${base}1${count > 1 ? ` to ${base}${count}` : ""}.`;
+}
 
 const LANGUAGES = {
     es: { name: "Spanish", espeak: "es" },
@@ -1289,14 +1519,14 @@ const SCRIPTS = [
 ];
 const COMMON_WORDS = {
     us: "the and is you to of it that this with for are was have not what",
-    es: "el los las que es un una por con para pero como esta más muy qué",
-    fr: "le les des est une que pas vous je nous dans pour avec sur ça très",
-    de: "der die das und ist nicht ich ein eine mit auf für auch sie wir",
-    it: "il gli che è sono non per una con questo come più anche ma",
-    pt: "os uma não você são com para como mas muito em isso também",
-    nl: "de het een en van is niet ik dat je op te voor met maar ook",
-    id: "yang dan di ini itu tidak untuk saya dengan ada dari akan",
-    tr: "bir ve bu için ama çok ben sen değil ne gibi daha"
+    es: "el los las que es un una por con para pero como esta más muy qué hola gracias estas estás buenos donde bien",
+    fr: "le les des est une que pas vous je nous dans pour avec sur ça très bonjour merci oui salut tout monde bien",
+    de: "der die das und ist nicht ich ein eine mit auf für auch sie wir es wie dir du bin geht hallo guten danke ja",
+    it: "il gli che è sono non per una con questo come più anche ma ciao grazie buongiorno bene",
+    pt: "os uma não você são com para como mas muito em isso também olá obrigado bem",
+    nl: "de het een en van is niet ik dat je op te voor met maar ook hallo dank goed",
+    id: "yang dan di ini itu tidak untuk saya dengan ada dari akan halo terima kasih selamat pagi",
+    tr: "bir ve bu için ama çok ben sen değil ne gibi daha merhaba teşekkürler evet"
 };
 const GIVEAWAYS = { es: /[ñ¿¡]/g, de: /ß/g, pt: /[ãõ]/g, tr: /[ğşı]/g };
 const VIETNAMESE_LETTERS = /[ăđơưạảấầẩẫậắằẳẵặẹẻẽếềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỵỷỹ]/g;
@@ -1310,7 +1540,7 @@ function detectAccent(text) {
     if ((letters.match(VIETNAMESE_LETTERS) || []).length >= 3) return "vi";
     const words = text.toLowerCase().match(/[\p{L}']+/gu) || [];
     let best = "us";
-    let bestScore = 1;
+    let bestScore = 0;
     for (const [code, list] of Object.entries(COMMON_WORDS)) {
         const known = new Set(list.split(" "));
         const bonus = GIVEAWAYS[code] ? 2 * (text.toLowerCase().match(GIVEAWAYS[code]) || []).length : 0;
@@ -1321,6 +1551,25 @@ function detectAccent(text) {
         }
     }
     return best === "us" ? DEFAULT_ACCENT : best;
+}
+
+const LANGID_PYTHON = process.env.LANGID_PYTHON || path.join(os.homedir(), "khoibot", "langenv", "bin", "python");
+const LANGID_MODEL = process.env.LANGID_MODEL || path.join(os.homedir(), "khoibot", "lid.176.ftz");
+const LANGID_MIN_CONFIDENCE = 0.5;
+const LANGID_CODE = "import sys, fasttext; labels, probs = fasttext.load_model(sys.argv[1]).predict(sys.argv[2].replace('\\n', ' ')); print(labels[0].replace('__label__', ''), round(float(probs[0]), 2))";
+
+async function guessAccent(text, source = "ai") {
+    try {
+        const { stdout } = await execFileAsync(LANGID_PYTHON, ["-c", LANGID_CODE, LANGID_MODEL, text], { timeout: 10 * 1000 });
+        const [code, score] = stdout.trim().split(" ");
+        const language = code === "zh" ? "ch" : code;
+        log.info(source, "language guess:", language, score);
+        if (!(Number(score) >= LANGID_MIN_CONFIDENCE)) return DEFAULT_ACCENT;
+        return Object.hasOwn(LANGUAGES, language) ? language : DEFAULT_ACCENT;
+    } catch (error) {
+        log.error(source, "language guess did not work, using the word lists instead:", error.message);
+        return detectAccent(text);
+    }
 }
 
 function speakable(text) {
@@ -1352,50 +1601,155 @@ async function runVoiceTool(file, args, missingMessage) {
     }
 }
 
-async function speakWithPiper(accent, input, wav) {
-    const model = VOICES[accent];
+async function speakWithPiper(accent, input, wav, source = "ai") {
+    const model = voiceModel(accent);
     if (!model) return false;
     try {
         await runVoiceTool(PIPER_PYTHON, ["-m", "piper", "-m", model, "--data-dir", PIPER_DATA_DIR, "-f", wav, "--input-file", input], "piper is not installed on the bot's machine yet.");
         return true;
     } catch (error) {
-        log.error("ai", "Piper did not work, using espeak-ng instead:", error);
+        log.error(source, "Piper did not work, using espeak-ng instead:", error);
         return false;
     }
 }
 
-async function speak(text, accent = DEFAULT_ACCENT) {
+const KANA_CODE = "import sys, re, alkana; print(re.sub(r\"[A-Za-z]+\", lambda m: alkana.get_kana(m.group(0).lower()) or m.group(0), sys.argv[1]))";
+
+async function toKatakana(text, { required = true, source = "tts" } = {}) {
+    try {
+        const { stdout } = await execFileAsync(PIPER_PYTHON, ["-c", KANA_CODE, text], { timeout: 10 * 1000 });
+        return stdout.trim() || text;
+    } catch (error) {
+        if (!required) {
+            log.error(source, "Could not turn the text into katakana, saying it as it is:", error.message);
+            return text;
+        }
+        if (error.code === "ENOENT" || /No module named/.test(error.stderr || "")) {
+            throw Object.assign(new Error("-translate needs alkana installed on the bot's machine (pip install alkana)."), { userFacing: true });
+        }
+        throw error;
+    }
+}
+
+const FISH_URL = "https://api.fish.audio/v1/tts";
+const FISH_MODEL = process.env.FISH_MODEL || "s2.1-pro";
+const FISH_TIMEOUT_MS = 30 * 1000;
+const FISH_VOICES = Object.fromEntries((process.env.FISH_VOICES || "")
+    .split(",")
+    .map(pair => pair.split("=").map(part => part.trim()))
+    .filter(([name, id]) => name && id)
+    .map(([name, id]) => [name.toLowerCase(), id]));
+
+async function speakWithFish(accent, text, file, source = "ai") {
+    if (!process.env.FISH_API_KEY) return false;
+    try {
+        const body = { text, format: "mp3" };
+        if (Object.hasOwn(FISH_VOICES, accent)) body.reference_id = FISH_VOICES[accent];
+        const response = await fetch(FISH_URL, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${process.env.FISH_API_KEY}`, "Content-Type": "application/json", model: FISH_MODEL },
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(FISH_TIMEOUT_MS)
+        });
+        if (!response.ok) throw new Error(`fish audio answered ${response.status}`);
+        const audio = Buffer.from(await response.arrayBuffer());
+        if (!audio.length) throw new Error("fish audio sent back nothing");
+        await fs.promises.writeFile(file, audio);
+        return true;
+    } catch (error) {
+        log.error(source, "Fish Audio did not work, using the local voice instead:", error.message);
+        return false;
+    }
+}
+
+async function speak(text, accent = DEFAULT_ACCENT, source = "ai", { local = false } = {}) {
     const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "khoibot-voice-"));
     try {
         const input = path.join(dir, "say.txt");
         const wav = path.join(dir, "say.wav");
+        const fish = path.join(dir, "fish.mp3");
         const voice = path.join(dir, "say.ogg");
         await fs.promises.writeFile(input, text);
-        if (!(await speakWithPiper(accent, input, wav))) {
-            await runVoiceTool(process.env.ESPEAK_PATH || "espeak-ng", ["-v", (LANGUAGES[accent]?.espeak || (accent === "uk" ? "en-gb" : "en-us")), "-s", "160", "-f", input, "-w", wav], "espeak-ng is not installed on the bot's machine yet.");
+        let heard = wav;
+        if (!local && await speakWithFish(accent, text, fish, source)) {
+            heard = fish;
+        } else if (!(await speakWithPiper(accent, input, wav, source))) {
+            await runVoiceTool(process.env.ESPEAK_PATH || "espeak-ng", ["-v", (LANGUAGES[accent.replace(/\d+$/, "")]?.espeak || (accent.startsWith("uk") ? "en-gb" : "en-us")), "-s", "160", "-f", input, "-w", wav], "espeak-ng is not installed on the bot's machine yet.");
         }
-        await runVoiceTool("ffmpeg", ["-y", "-loglevel", "error", "-i", wav, "-ac", "1", "-ar", "48000", "-c:a", "libopus", "-b:a", "32k", voice], "ffmpeg is not installed on the bot's machine.");
+        await runVoiceTool("ffmpeg", ["-y", "-loglevel", "error", "-i", heard, "-ac", "1", "-ar", "48000", "-c:a", "libopus", "-b:a", "32k", voice], "ffmpeg is not installed on the bot's machine.");
         return await fs.promises.readFile(voice);
     } finally {
         await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => { });
     }
 }
 
-async function voiceNote(answer, accent) {
+async function voiceNote(answer, accent, source = "ai", { mode = "", local = false } = {}) {
     const spoken = speakable(answer);
-    log.info("ai", "voice answer:", JSON.stringify(answer), "| spoken:", JSON.stringify(spoken));
-    return spoken ? speak(spoken, accent === "auto" ? detectAccent(spoken) : accent) : null;
+    const voice = accent === "auto" ? await guessAccent(spoken, source) : accent;
+    log.info(source, "voice answer:", JSON.stringify(answer), "| spoken:", JSON.stringify(spoken), "| voice:", voice);
+    if (!spoken) return null;
+    const kana = mode === "translate" || (mode === "" && voice === "ja");
+    return speak(kana ? await toKatakana(spoken, { required: mode === "translate", source }) : spoken, voice, source, { local: local || mode === "asis" });
+}
+
+const TRAILING_FLAG = /(^|\s)-(local|translate|asis)$/i;
+const ANY_FLAG = /(^|\s)-(local|translate|asis)(?=\s|$)/i;
+
+function takeTrailingFlags(text, names) {
+    const flags = [];
+    let rest = text.trimEnd();
+    for (let match = TRAILING_FLAG.exec(rest); match && names.includes(match[2].toLowerCase()); match = TRAILING_FLAG.exec(rest)) {
+        flags.push(match[2].toLowerCase());
+        rest = rest.slice(0, match.index).trimEnd();
+    }
+    return { text: rest, flags };
+}
+
+async function textToSpeech(input, quoted = "") {
+    const taken = takeTrailingFlags(input, ["local", "translate", "asis"]);
+    const flags = taken.flags;
+    const local = flags.includes("local");
+    const modes = flags.filter(flag => flag !== "local");
+
+    const [first, ...rest] = taken.text.trim().split(/\s+/);
+    const word = first.toLowerCase();
+    const problem = voiceProblem(word);
+    if (problem) throw Object.assign(new Error(problem), { userFacing: true });
+    const named = voiceModel(word) || Object.hasOwn(LANGUAGES, word);
+    const text = named ? rest.join(" ") : taken.text;
+
+    if (ANY_FLAG.test(text)) {
+        throw Object.assign(new Error("Put the flag at the end, like !tts ja hello there -asis."), { userFacing: true });
+    }
+    if (modes.length && word !== "ja") {
+        throw Object.assign(new Error("-translate and -asis only work with ja, like !tts ja hello there -translate."), { userFacing: true });
+    }
+    if (new Set(modes).size > 1) {
+        throw Object.assign(new Error("Use either -translate or -asis, not both."), { userFacing: true });
+    }
+
+    return voiceNote(text || quoted, named ? word : "auto", "tts", { mode: modes[0] || "", local });
 }
 
 function takeVoiceFlag(text) {
+    if (!/(?<![\w/=-])-voice(?=\s|$)/i.test(text)) return null;
+    const { text: rest, flags } = takeTrailingFlags(text, ["local"]);
+    const taken = takeVoiceFlagFrom(flags.length ? rest : text);
+    return taken && { ...taken, local: flags.length > 0 };
+}
+
+function takeVoiceFlagFrom(text) {
     const flag = /(?<![\w/=-])-voice(?=\s|$)/i.exec(text);
     if (!flag) return null;
     const before = text.slice(0, flag.index);
     const after = text.slice(flag.index + flag[0].length);
     const next = /^\s+(\S+)/.exec(after);
     const named = next && next[1].toLowerCase();
-    const language = named && Object.hasOwn(LANGUAGES, named) ? LANGUAGES[named] : null;
-    if (named && (Object.hasOwn(VOICES, named) || language)) {
+    const problem = named ? voiceProblem(named) : "";
+    if (problem) return { prompt: "", accent: "auto", empty: true, problem };
+    const base = named ? named.replace(/\d+$/, "") : "";
+    const language = base && (named === base || voiceModel(named)) && Object.hasOwn(LANGUAGES, base) ? LANGUAGES[base] : null;
+    if (named && (voiceModel(named) || language)) {
         const rest = before + " " + after.slice(next[0].length);
         const prompt = language ? rest.trim() + "\n\n(answer in " + language.name + ", it will be read out loud)" : rest;
         return { prompt, accent: named, empty: !rest.trim() };
@@ -1403,4 +1757,4 @@ function takeVoiceFlag(text) {
     return { prompt: before + " " + after, accent: "auto", empty: !(before + after).trim() };
 }
 
-module.exports = { handleDescribeImage, summarizeText, writeLine, handleAi, askDesktop, handleImagine, translateText, resetAllChatModels, handleWitt, voiceNote, takeVoiceFlag };
+module.exports = { handleDescribeImage, summarizeText, writeLine, handleAi, askDesktop, handleImagine, translateText, resetAllChatModels, handleWitt, voiceNote, textToSpeech, takeVoiceFlag };

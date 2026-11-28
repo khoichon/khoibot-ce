@@ -1,7 +1,7 @@
 // Extra commands, all behind ENABLE_EXTRA_COMMANDS=1 (off by default).
 //
-//   !fact  !joke  !define  !wiki  !translate  !quote  !tts  !ttscss  !sticker  !animsticker  !edit  !roast  !compliment
-//   !automute  !autounmute  !mute  !unmute  !ban  !unban  !execute  !add !warn !unwarn !warnings !deletemessages
+//   !fact  !joke  !define  !wiki  !translate  !quote  !tts  !ttsticker  !ttscss  !sticker  !animsticker  !edit  !roast  !compliment
+//   !automute  !autounmute  !mutechat  !unmutechat  !mute  !unmute  !ban  !unban  !execute  !add !warn !unwarn !modlog !delete
 //
 // index.js calls init(sock) once per socket and handleCommand() for every
 // command, handleCommand() returns true when it used the message.
@@ -43,6 +43,7 @@ let state = {
     // { chatId, ids, until, jid } for a !ban, until is null for a permanent one,
     // jid is who got banned so the bot can tag them when it runs out
     bans: [],
+    userMutes: [],
     // { chatId, ids, jid, times } for !warn, times is when each warning was given and jid is who got warned so the bot can tag them
     warns: [],
     // phone numbers added with !special forceban, the ones from FORCE_BANNED in .env arent kept here
@@ -76,6 +77,7 @@ function loadState() {
             }
             if (Array.isArray(saved.mutes)) { state.mutes = saved.mutes.filter(entry => entry && typeof entry.chatId === "string" && typeof entry.until === "number"); }
             if (Array.isArray(saved.bans)) { state.bans = saved.bans.filter(ban => ban && typeof ban.chatId === "string" && Array.isArray(ban.ids) && (ban.until === null || typeof ban.until === "number")); }
+            if (Array.isArray(saved.userMutes)) { state.userMutes = saved.userMutes.filter(mute => mute && typeof mute.chatId === "string" && typeof mute.jid === "string" && Array.isArray(mute.ids) && typeof mute.reason === "string" && (mute.until === null || typeof mute.until === "number")); }
 if (Array.isArray(saved.warns)) { state.warns = saved.warns.filter(entry => entry && typeof entry.chatId === "string" && typeof entry.jid === "string" && Array.isArray(entry.ids) && Array.isArray(entry.times) && entry.chatId !== "*"); }
         }
     } catch (error) {
@@ -607,7 +609,7 @@ async function handleEdit(sock, msg, { text, commandPrefix }) {
 // A video or GIF becomes an animated sticker (reply to it, or send it with the
 // command as the caption). Images can be combined into a slideshow:
 //   !animsticker add   (on each image or sticker, 2 to 8)  then  !animsticker done
-// Animated text stickers are made with !tts <text> -anim <style>.
+// Animated text stickers are made with !ttsticker <text> -anim <style>.
 // ============================================================
 
 const SLIDESHOW_MAX_IMAGES = 8;
@@ -664,7 +666,7 @@ async function handleAnimSticker(sock, msg, { text, commandPrefix }) {
     const usage = [
         `Videos and GIFs: reply to one with ${commandPrefix}animsticker, or send it with ${commandPrefix}animsticker as the caption.`,
         `Slideshow: use ${commandPrefix}animsticker add on 2 to ${SLIDESHOW_MAX_IMAGES} images or stickers (reply to each, or send an image with it as the caption), then ${commandPrefix}animsticker done. Use ${commandPrefix}animsticker cancel to start over.`,
-        `Animated text: ${commandPrefix}tts <text> -anim <${animation.STYLES.join("|")}>`
+        `Animated text: ${commandPrefix}ttsticker <text> -anim <${animation.STYLES.join("|")}>`
     ].join("\n");
 
     const action = argsOf(text).split(/\s+/)[0].toLowerCase();
@@ -800,9 +802,41 @@ async function handleQuote(sock, msg, { text, commandPrefix }) {
     );
 }
 
+//!tts
+
+async function handleTts(sock, msg, { text, commandPrefix }) {
+    const quoted = quotedText(msg);
+    const args = argsOf(text);
+    if (!args && !quoted) {
+        await reply(sock, msg, `Usage: ${commandPrefix}tts [accent or language] <text>\nAlternatively, reply to a message with ${commandPrefix}tts.`);
+        return;
+    }
+
+    sock.sendPresenceUpdate("recording", msg.key.remoteJid).catch(() => {});
+    let audio;
+    try {
+        audio = await aitools.textToSpeech(args, quoted);
+    } catch (error) {
+        if (error.userFacing) {
+            sock.sendPresenceUpdate("paused", msg.key.remoteJid).catch(() => {});
+            await reply(sock, msg, error.message);
+            return;
+        }
+        log.error("extras", "Could not make the voice note:", error);
+        sock.sendPresenceUpdate("paused", msg.key.remoteJid).catch(() => {});
+        await reply(sock, msg, "I couldn't make that voice note. Please try again later.");
+        return;
+    }
+    sock.sendPresenceUpdate("paused", msg.key.remoteJid).catch(() => {});
+    if (!audio) {
+        await reply(sock, msg, "There is nothing to read out loud in that.");
+        return;
+    }
+    await sock.sendMessage(msg.key.remoteJid, { audio, mimetype: "audio/ogg; codecs=opus", ptt: true }, { quoted: msg });
+}
 
 // ============================================================
-// !tts [font] <text> [-bg <color>] [-clr <color>] [-size <number>]
+// !ttsticker [font] <text> [-bg <color>] [-clr <color>] [-size <number>]
 // Draws the text on a 512x512 image and sends it as a sticker.
 // The fonts have to be installed on the machine running the bot, if one is
 // missing the system falls back to a default font.
@@ -920,10 +954,10 @@ function wrapText(text, fontSize, ratio, maxWidth) {
     return lines;
 }
 
-async function handleTts(sock, msg, { text, commandPrefix }) {
+async function handleTtsticker(sock, msg, { text, commandPrefix }) {
     const usage = [
-        `Usage: ${commandPrefix}tts [font] <text> [-bg <color>] [-clr <color>] [-size <number>] [-anim <style>] [-var <axis=value,...>]`,
-        `Alternatively, reply to a message with ${commandPrefix}tts.`,
+        `Usage: ${commandPrefix}ttsticker [font] <text> [-bg <color>] [-clr <color>] [-size <number>] [-anim <style>] [-var <axis=value,...>]`,
+        `Alternatively, reply to a message with ${commandPrefix}ttsticker.`,
         "Colors may be a hex code such as #112233, a basic color name such as red, or two colors separated by a comma for a gradient (red,blue).",
         `Include &#rrggbb within the text to change the color from that point onward.\nAvailable fonts: ${Object.keys(FONTS).join(", ")}\nAnimations (-anim): ${animation.STYLES.join(", ")}\nVariable fonts (kablammo, bitcountink) take -var with axis=value pairs, for example -var wght=700,MORF=30.`
     ].join("\n");
@@ -1577,9 +1611,9 @@ function init(sock) {
     }
 }
 
-// !mute / !unmute
-// !mute on its own mutes the group for good. !mute 2h, !mute 120min or
-// !mute 1h30min mutes it for that long and unmutes it again by itself.
+// !mutechat / !unmutechat
+// !mutechat on its own mutes the group for good. !mutechat 2h, !mutechat 120min or
+// !mutechat 1h30min mutes it for that long and unmutes it again by itself.
 // muting here is the same as !automute: only admins can send messages, so the
 // bot has to be an admin to change it.
 // ============================================================
@@ -1618,8 +1652,8 @@ function describeDuration(ms) {
     return [days && `${days}d`, hours && `${hours}h`, minutes && `${minutes}min`].filter(Boolean).join(" ");
 }
 
-async function handleMute(sock, msg, { chatId, text, isGroup, trusted, groupAdmin, commandPrefix }) {
-    const muting = text.trim().split(/\s+/)[0].toLowerCase() === "!mute";
+async function handleMuteChat(sock, msg, { chatId, text, isGroup, trusted, groupAdmin, commandPrefix }) {
+    const muting = text.trim().split(/\s+/)[0].toLowerCase() === "!mutechat";
 
     if (!isGroup) {
         await reply(sock, msg, "This command can only be used in a group.");
@@ -1639,8 +1673,8 @@ async function handleMute(sock, msg, { chatId, text, isGroup, trusted, groupAdmi
             await reply(
                 sock,
                 msg,
-                `Use ${commandPrefix}mute on its own to mute for good, or add a time from 1min to 30d, ` +
-                `like ${commandPrefix}mute 2h, ${commandPrefix}mute 120min or ${commandPrefix}mute 1h30min.`
+                `Use ${commandPrefix}mutechat on its own to mute for good, or add a time from 1min to 30d, ` +
+                `like ${commandPrefix}mutechat 2h, ${commandPrefix}mutechat 120min or ${commandPrefix}mutechat 1h30min.`
             );
             return;
         }
@@ -1654,7 +1688,7 @@ async function handleMute(sock, msg, { chatId, text, isGroup, trusted, groupAdmi
         return;
     }
 
-    // a new !mute or an !unmute replaces any timer already running for this group
+    // a new !mutechat or an !unmutechat replaces any timer already running for this group
     state.mutes = state.mutes.filter((entry) => entry.chatId !== chatId);
     if (duration) {
         state.mutes.push({ chatId, until: Date.now() + duration });
@@ -1666,7 +1700,7 @@ async function handleMute(sock, msg, { chatId, text, isGroup, trusted, groupAdmi
     } else if (duration) {
         await reply(sock, msg, `The group has been muted for ${describeDuration(duration)}. Only administrators can send messages.`);
     } else {
-        await reply(sock, msg, `The group has been muted. Only administrators can send messages until someone runs ${commandPrefix}unmute.`);
+        await reply(sock, msg, `The group has been muted. Only administrators can send messages until someone runs ${commandPrefix}unmutechat.`);
     }
 }
 
@@ -1701,6 +1735,119 @@ async function runMutes() {
     } finally {
         mutesRunning = false;
     }
+}
+
+function isUserMuted(chatId, jids) {
+    if (!extraCommandsEnabled() || state.userMutes.length === 0) {
+        return false;
+    }
+    const parts = jids.filter(Boolean).map(userPart);
+    const now = Date.now();
+    return state.userMutes.some(mute =>
+        mute.chatId === chatId &&
+        (mute.until === null || mute.until > now) &&
+        mute.ids.some(id => parts.includes(id))
+    );
+}
+
+function cleanUserMutes() {
+    const before = state.userMutes.length;
+    const now = Date.now();
+    state.userMutes = state.userMutes.filter(mute => mute.until === null || mute.until > now);
+    if (state.userMutes.length !== before) {
+        saveState();
+    }
+}
+
+async function botIsAdmin(sock, chatId) {
+    try {
+        const metadata = await sock.groupMetadata(chatId);
+        const me = [sock.user?.id, sock.user?.lid].filter(Boolean).map(userPart);
+        return metadata.participants.some(p =>
+            p.admin && [p.id, p.lid, p.phoneNumber, p.jid].some(x => x && me.includes(userPart(x)))
+        );
+    } catch (error) {
+        log.error("extras", "Could not check if I'm a group admin:", error);
+        return false;
+    }
+}
+
+async function handleMuteUser(sock, msg, ctx) {
+    const { chatId, text, isGroup, trusted, groupAdmin, senderJid, commandPrefix } = ctx;
+    const muting = text.trim().split(/\s+/)[0].toLowerCase() === "!mute";
+
+    if (!isGroup) {
+        await reply(sock, msg, "This command can only be used in a group.");
+        return;
+    }
+    if (!trusted && !groupAdmin) {
+        await reply(sock, msg, "Only group administrators and trusted users may use this command.");
+        return;
+    }
+
+    const { target, words } = pickTarget(msg, text);
+    if (!target) {
+        await reply(sock, msg, muting
+            ? `Say who to mute: ${commandPrefix}mute [time] @user <reason>, or reply to them with ${commandPrefix}mute [time] <reason>.`
+            : `Say who to unmute: ${commandPrefix}unmute @user, reply to them with ${commandPrefix}unmute, or ${commandPrefix}unmute <phone number>.`);
+        return;
+    }
+
+    if (!muting) {
+        const ids = await idsFor(sock, chatId, target);
+        const before = state.userMutes.length;
+        state.userMutes = state.userMutes.filter(mute => !(mute.chatId === chatId && mute.ids.some(id => ids.includes(id))));
+        saveState();
+        await reply(sock, msg, state.userMutes.length !== before ? "Unmuted. Their messages won't be deleted anymore." : "That person isn't muted.");
+        return;
+    }
+
+    let duration = null;
+    if (words.length && parseDuration(words[0]) !== null) {
+        duration = parseDuration(words.shift());
+        if (duration < MIN_MUTE_MS || duration > MAX_MUTE_MS) {
+            await reply(sock, msg, `I couldn't use that time. Try something like ${commandPrefix}mute 2h @user <reason> (1 minute to 30 days).`);
+            return;
+        }
+    }
+
+    const reason = words.join(" ").trim().slice(0, 200);
+    if (!reason) {
+        await reply(sock, msg, `Give a reason for the mute: ${commandPrefix}mute [time] @user <reason>.`);
+        return;
+    }
+
+    const member = await findMember(sock, chatId, target);
+    if (!member) {
+        await reply(sock, msg, "I couldn't find that person in this group.");
+        return;
+    }
+
+    const ids = idsOfMember(member);
+    const me = [sock.user?.id, sock.user?.lid].filter(Boolean).map(userPart);
+    if (ids.some(id => me.includes(id))) {
+        await reply(sock, msg, "I can't mute myself.");
+        return;
+    }
+    const memberTrusted = [member.id, member.lid, member.phoneNumber, member.jid].some(id => isTrusted(id));
+    if (member.admin || memberTrusted) {
+        await reply(sock, msg, "Group admins and trusted users can't be muted.");
+        return;
+    }
+    if (!(await botIsAdmin(sock, chatId))) {
+        await reply(sock, msg, "I need to be a group administrator to delete their messages.");
+        return;
+    }
+
+    state.userMutes = state.userMutes.filter(mute => !(mute.chatId === chatId && mute.ids.some(id => ids.includes(id))));
+    state.userMutes.push({ chatId, ids, jid: member.id, until: duration ? Date.now() + duration : null, reason, by: senderJid, at: Date.now() });
+    saveState();
+
+    const how = duration ? ` for ${describeDuration(duration)}` : "";
+    await sock.sendMessage(chatId, {
+        text: `@${userPart(member.id)} has been muted${how}. I'll delete their messages until then.\nReason: ${reason}`,
+        mentions: [member.id]
+    });
 }
 
 // !ban / !unban
@@ -2040,7 +2187,7 @@ async function handleExecute(sock, msg, { chatId, text, isGroup, trusted, groupA
 const MAX_DELETE = 100;
 const DELETE_GAP_MS = 600;
 
-async function handleDeleteMessages(sock, msg, { chatId, text, isGroup, trusted, groupAdmin, commandPrefix }) {
+async function handleDelete(sock, msg, { chatId, text, isGroup, trusted, groupAdmin, commandPrefix }) {
     if (!isGroup) {
         await reply(sock, msg, "This command can only be used in a group.");
         return;
@@ -2050,9 +2197,13 @@ async function handleDeleteMessages(sock, msg, { chatId, text, isGroup, trusted,
         return;
     }
 
-    const count = Number(argsOf(text).split(/s+/)[0]);
-    if (!Number.isInteger(count) || count < 1 || count > MAX_DELETE) {
-        await reply(sock, msg, `Usage: ${commandPrefix}deletemessages <1-${MAX_DELETE}>`);
+    const arg = argsOf(text).split(/\s+/)[0];
+    const quoted = msg.message?.extendedTextMessage?.contextInfo;
+    const replyingTo = !arg && quoted?.stanzaId ? quoted : null;
+
+    const count = Number(arg);
+    if (!replyingTo && (!Number.isInteger(count) || count < 1 || count > MAX_DELETE)) {
+        await reply(sock, msg, `Usage: ${commandPrefix}delete <1-${MAX_DELETE}>, or reply to a message with ${commandPrefix}delete`);
         return;
     }
 
@@ -2064,7 +2215,13 @@ async function handleDeleteMessages(sock, msg, { chatId, text, isGroup, trusted,
         return;
     }
 
-    const targets = recentKeys(chatId, count + 1).filter(key => key.id !== msg.key.id).slice(-count);
+    let targets;
+    if (replyingTo) {
+        const sender = replyingTo.participant || undefined;
+        targets = [{ remoteJid: chatId, id: replyingTo.stanzaId, fromMe: me.includes(userPart(sender)), participant: sender }];
+    } else {
+        targets = recentKeys(chatId, count + 1).filter(key => key.id !== msg.key.id).slice(-count);
+    }
     if (!targets.length) {
         await reply(sock, msg, "I don't remember any messages to delete yet. I can only delete ones from after I last started.");
         return;
@@ -2128,7 +2285,7 @@ async function addMember(sock, msg, { chatId, isGroup, number }) {
 }
 
 // ============================================================
-// !warn / !unwarn / !warnings
+// !warn / !unwarn / !modlog
 // ============================================================
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -2211,7 +2368,7 @@ async function findMember(sock, chatId, target) {
 }
 
 // the checks every warn command starts with. says why and gives back false when it shouldnt go on
-async function warnGuard(sock, msg, { chatId, isGroup, trusted, groupAdmin }) {
+async function warnGuard(sock, msg, { chatId, isGroup, trusted, groupAdmin }, { checkToggle = true } = {}) {
     if (!isGroup) {
         await reply(sock, msg, "This command can only be used in a group.");
         return false;
@@ -2220,7 +2377,7 @@ async function warnGuard(sock, msg, { chatId, isGroup, trusted, groupAdmin }) {
         await reply(sock, msg, "Only group administrators and trusted users may use this command.");
         return false;
     }
-    if (getGroupSetting(chatId, "warntoggle") === false) {
+    if (checkToggle && getGroupSetting(chatId, "warntoggle") === false) {
         await reply(sock, msg, "The warn commands are turned off in this group. Use !mod warntoggle true to turn them on.");
         return false;
     }
@@ -2269,6 +2426,7 @@ async function giveWarning(sock, chatId, member, ids, reason, isStaff, amount = 
     // everything that went through gets listed in the message at the end
     const done = [];
     let kickFailed = false;
+    let muteFailed = false;
 
     if (actions.includes("kick")) {
         try {
@@ -2292,23 +2450,35 @@ async function giveWarning(sock, chatId, member, ids, reason, isStaff, amount = 
         done.push(`banned from using the bot${duration ? ` for ${describeDuration(duration)}` : ""}`);
     }
 
+    if (actions.includes("mute")) {
+        if (await botIsAdmin(sock, chatId)) {
+            const duration = getGroupSetting(chatId, "warnbanduration");
+            state.userMutes = state.userMutes.filter(mute => !(mute.chatId === chatId && mute.ids.some(id => ids.includes(id))));
+            state.userMutes.push({ chatId, ids, jid: member.id, until: duration ? Date.now() + duration : null, reason: `Reached the warning limit (${count}/${limit})`, by: null, at: Date.now() });
+            done.push(`muted${duration ? ` for ${describeDuration(duration)}` : ""}`);
+        } else {
+            muteFailed = true;
+        }
+    }
+
     // nothing to do at the limit, so just say they got there
-    if (!done.length && !kickFailed) {
+    if (!done.length && !kickFailed && !muteFailed) {
         await say(`${tag} has reached ${count}/${limit} warnings.`);
         return;
     }
 
-    // the kick was the only action and it failed, so nothing happened yet. the next warning tries it again
+    // the kick or the mute was the only action and it failed, so nothing happened yet. the next warning tries it again
     if (!done.length) {
-        await say(`${tag} has reached ${count}/${limit} warnings, but I couldn't remove them. Make sure I'm a group administrator.`);
+        await say(`${tag} has reached ${count}/${limit} warnings, but I couldn't ${kickFailed ? "remove them" : "mute them"}. Make sure I'm a group administrator.`);
         return;
     }
 
     saveState();
 
     const result = done.join(" and ");
-    if (kickFailed) {
-        await say(`${tag} has been warned${times} (${count}/${limit}) and ${result}, but I couldn't remove them from the group. Make sure I'm a group administrator.`);
+    const problem = kickFailed ? "remove them from the group" : muteFailed ? "mute them" : "";
+    if (problem) {
+        await say(`${tag} has been warned${times} (${count}/${limit}) and ${result}, but I couldn't ${problem}. Make sure I'm a group administrator.`);
     } else {
         await say(`${tag} has been warned${times} (${count}/${limit})${done.length > 1 ? "," : " and"} ${result}.`);
     }
@@ -2475,7 +2645,7 @@ async function handleUnwarn(sock, msg, ctx) {
     if (numberAt !== -1) {
         const number = Number(words[numberAt + 1]);
         if (!Number.isInteger(number) || number < 1) {
-            await reply(sock, msg, `Give the warning number from ${commandPrefix}warnings @user, like ${commandPrefix}unwarn @user warnnumber 2.`);
+            await reply(sock, msg, `Give the warning number from ${commandPrefix}modlog @user, like ${commandPrefix}unwarn @user warnnumber 2.`);
             return;
         }
         if (number > live.length) {
@@ -2506,27 +2676,37 @@ async function handleUnwarn(sock, msg, ctx) {
     await sock.sendMessage(chatId, { text: message, mentions: [member.id] });
 }
 
-async function handleWarnings(sock, msg, ctx) {
+async function handleModlog(sock, msg, ctx) {
     const { chatId, text } = ctx;
-    if (!(await warnGuard(sock, msg, ctx))) {
+    if (!(await warnGuard(sock, msg, ctx, { checkToggle: false }))) {
         return;
     }
 
     cleanWarns();
+    cleanUserMutes();
     const limit = getGroupSetting(chatId, "warnlimit");
     const { target } = pickTarget(msg, text);
 
-    // no one picked means everyone in the group who has warnings
+    const muteLine = mute => `${mute.reason} (${mute.until === null ? "until unmuted" : `${describeDuration(mute.until - Date.now())} left`})`;
+
+    // no one picked means everyone in the group who has warnings or a mute
     if (!target) {
-        const here = state.warns.filter(entry => entry.chatId === chatId);
-        if (!here.length) {
-            await reply(sock, msg, "Nobody in this group has any warnings.");
+        const warned = state.warns.filter(entry => entry.chatId === chatId);
+        const muted = state.userMutes.filter(mute => mute.chatId === chatId);
+        if (!warned.length && !muted.length) {
+            await reply(sock, msg, "Nothing in the mod log for this group.");
             return;
         }
-        const lines = here.map(entry => `@${userPart(entry.jid)}: ${entry.times.length}/${limit}`);
+        const parts = [];
+        if (warned.length) {
+            parts.push(`Warnings:\n${warned.map(entry => `@${userPart(entry.jid)}: ${entry.times.length}/${limit}`).join("\n")}`);
+        }
+        if (muted.length) {
+            parts.push(`Muted:\n${muted.map(mute => `@${userPart(mute.jid)}: ${muteLine(mute)}`).join("\n")}`);
+        }
         await sock.sendMessage(chatId, {
-            text: `Warnings in this group:\n${lines.join("\n")}`,
-            mentions: here.map(entry => entry.jid)
+            text: `Mod log for this group:\n\n${parts.join("\n\n")}`,
+            mentions: [...warned.map(entry => entry.jid), ...muted.map(mute => mute.jid)]
         });
         return;
     }
@@ -2537,22 +2717,28 @@ async function handleWarnings(sock, msg, ctx) {
         return;
     }
 
-    const entry = warnEntryFor(chatId, idsOfMember(member));
+    const ids = idsOfMember(member);
+    const entry = warnEntryFor(chatId, ids);
+    const mute = state.userMutes.find(other => other.chatId === chatId && other.ids.some(id => ids.includes(id)));
     const tag = `@${userPart(member.id)}`;
-    if (!entry) {
-        await sock.sendMessage(chatId, { text: `${tag} has no warnings.`, mentions: [member.id] });
+    if (!entry && !mute) {
+        await sock.sendMessage(chatId, { text: `${tag} has no warnings or mutes.`, mentions: [member.id] });
         return;
     }
 
-    // oldest first. warnings from before reasons got saved just say so
-    const reasonLines = entry.times.map((time, index) => {
-        const reason = entry.reasons?.[time] || "no reason given";
-        return `${index + 1}. ${reason} (${describeDuration(Date.now() - time)} ago)`;
-    });
-    await sock.sendMessage(chatId, {
-        text: `${tag} has ${entry.times.length}/${limit} warnings:\n${reasonLines.join("\n")}`,
-        mentions: [member.id]
-    });
+    const parts = [];
+    if (entry) {
+        // oldest first. warnings from before reasons got saved just say so
+        const reasonLines = entry.times.map((time, index) => {
+            const reason = entry.reasons?.[time] || "no reason given";
+            return `${index + 1}. ${reason} (${describeDuration(Date.now() - time)} ago)`;
+        });
+        parts.push(`${tag} has ${entry.times.length}/${limit} warnings:\n${reasonLines.join("\n")}`);
+    }
+    if (mute) {
+        parts.push(`${tag} is muted: ${muteLine(mute)}`);
+    }
+    await sock.sendMessage(chatId, { text: parts.join("\n\n"), mentions: [member.id] });
 }
 
 // ---------------------------------------------------------------------------
@@ -2674,6 +2860,7 @@ const COMMANDS = {
     "!wiki": handleWiki,
     "!quote": handleQuote,
     "!translate": handleTranslate,
+    "!ttsticker": handleTtsticker,
     "!tts": handleTts,
     "!ttscss": handleTtscss,
     "!sticker": handleSticker,
@@ -2681,15 +2868,17 @@ const COMMANDS = {
     "!edit": handleEdit,
     "!automute": handleAutoMute,
     "!autounmute": handleAutoMute,
-    "!mute": handleMute,
-    "!unmute": handleMute,
+    "!mutechat": handleMuteChat,
+    "!unmutechat": handleMuteChat,
+    "!mute": handleMuteUser,
+    "!unmute": handleMuteUser,
     "!ban": handleBan,
     "!unban": handleBan,
     "!execute": handleExecute,
-    "!deletemessages": handleDeleteMessages,
+    "!delete": handleDelete,
     "!warn": handleWarn,
     "!unwarn": handleUnwarn,
-    "!warnings": handleWarnings
+    "!modlog": handleModlog
 };
 
 async function handleCommand(sock, msg, ctx) {
@@ -2711,4 +2900,4 @@ async function handleCommand(sock, msg, ctx) {
     return true;
 }
 
-module.exports = { init, handleCommand, captionText, extraCommandsEnabled, isBanned, parseBanTime, describeDuration, curseDeleted, curseSettings, isForceBanned, forceBanCommand, addMember, isBlacklisted, blacklistCommand };
+module.exports = { init, handleCommand, captionText, extraCommandsEnabled, isBanned, isUserMuted, parseBanTime, describeDuration, curseDeleted, curseSettings, isForceBanned, forceBanCommand, addMember, isBlacklisted, blacklistCommand };

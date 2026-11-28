@@ -16,14 +16,15 @@ const BADWORDLOG_LEVELS = [
 ];
 
 // what the bot can do when someone reaches the warning limit
-const WARN_ACTIONS = ["kick", "ban", "notify"];
+const WARN_ACTIONS = ["kick", "ban", "mute", "notify"];
 
 // warnaction used to be one word, now it can be a list. an old single word still works.
 // the old none is called notify now. it can be stacked with kick and ban like the rest
 function normalizeWarnActions(raw) {
     const renamed = (Array.isArray(raw) ? raw : [raw]).map(action => (action === "none" ? "notify" : action));
     const picked = [...new Set(renamed.filter(action => WARN_ACTIONS.includes(action)))];
-    return picked.length ? picked : ["notify"];
+    const allowed = picked.includes("kick") ? picked.filter(action => action !== "mute") : picked;
+    return allowed.length ? allowed : ["notify"];
 }
 
 const DEFAULT_WELCOME_MSG =
